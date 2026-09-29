@@ -544,6 +544,16 @@ export default function PhotoMap() {
           zIndex: 0,
         }}
         onLoad={() => setMapReady(true)}
+        onClick={({ originalEvent }) => {
+          const target = originalEvent.target;
+          if (
+            target instanceof Element &&
+            target.closest(".maplibregl-marker, .maplibregl-popup")
+          ) {
+            return;
+          }
+          setSelectedMarker(null);
+        }}
         onMoveEnd={({ target }) => {
           const mapBounds = target.getBounds();
           handleBoundsChange(
@@ -570,7 +580,8 @@ export default function PhotoMap() {
                 longitude={longitude}
                 latitude={latitude}
                 anchor="bottom"
-                onClick={() => {
+                onClick={({ originalEvent }) => {
+                  originalEvent.stopPropagation();
                   if (supercluster && mapRef.current) {
                     const expansionZoom = Math.min(
                       supercluster.getClusterExpansionZoom(
@@ -599,9 +610,10 @@ export default function PhotoMap() {
                 longitude={longitude}
                 latitude={latitude}
                 anchor="bottom"
-                onClick={() =>
-                  setSelectedMarker({ type: "photo", id: photo.id })
-                }
+                onClick={({ originalEvent }) => {
+                  originalEvent.stopPropagation();
+                  setSelectedMarker({ type: "photo", id: photo.id });
+                }}
               >
                 {createPhotoIcon(photo)}
               </Marker>
@@ -615,9 +627,10 @@ export default function PhotoMap() {
                 longitude={longitude}
                 latitude={latitude}
                 anchor="center"
-                onClick={() =>
-                  setSelectedMarker({ type: "event", id: event.id })
-                }
+                onClick={({ originalEvent }) => {
+                  originalEvent.stopPropagation();
+                  setSelectedMarker({ type: "event", id: event.id });
+                }}
               >
                 {createEventIcon(event)}
               </Marker>
@@ -635,6 +648,7 @@ export default function PhotoMap() {
                 longitude={Number(photo.lng)}
                 latitude={Number(photo.lat)}
                 offset={30}
+                closeOnClick={false}
                 onClose={() => setSelectedMarker(null)}
                 maxWidth="250px"
               >
@@ -691,6 +705,7 @@ export default function PhotoMap() {
                 longitude={Number(event.lng)}
                 latitude={Number(event.lat)}
                 offset={30}
+                closeOnClick={false}
                 onClose={() => setSelectedMarker(null)}
                 maxWidth="280px"
               >
