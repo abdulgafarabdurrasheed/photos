@@ -1,33 +1,14 @@
 "use client";
-import { useEffect } from "react";
-import { MapContainer, Marker, TileLayer, useMap } from "react-leaflet";
-import "leaflet/dist/leaflet.css";
-import "leaflet-defaulticon-compatibility";
-import "leaflet-defaulticon-compatibility/dist/leaflet-defaulticon-compatibility.css";
-import {
-  CARTO_ATTRIBUTION_URL,
-  CARTO_BASEMAP_URL,
-  OPENSTREETMAP_COPYRIGHT_URL,
-} from "@/lib/constants";
+import MapLibreMap, { Marker } from "react-map-gl/maplibre";
+import "maplibre-gl/dist/maplibre-gl.css";
+import "@/lib/maplibre-worker";
+import { OPENFREEMAP_DARK_STYLE_URL } from "@/lib/constants";
 
 interface Props {
   lat: number;
   lng: number;
   zoom?: number;
   className?: string;
-}
-function MapUpdater({
-  center,
-  zoom,
-}: {
-  center: [number, number];
-  zoom: number;
-}) {
-  const map = useMap();
-  useEffect(() => {
-    map.setView(center, zoom);
-  }, [center, zoom, map]);
-  return null;
 }
 export default function MiniMap({
   lat,
@@ -37,22 +18,17 @@ export default function MiniMap({
 }: Props) {
   return (
     <div className={className}>
-      <MapContainer
-        center={[lat, lng]}
+      <MapLibreMap
+        longitude={lng}
+        latitude={lat}
         zoom={zoom}
-        scrollWheelZoom={false}
-        dragging={false}
-        zoomControl={false}
-        doubleClickZoom={false}
+        mapStyle={OPENFREEMAP_DARK_STYLE_URL}
+        interactive={false}
+        attributionControl={{ compact: true }}
         style={{ height: "100%", width: "100%", zIndex: 0 }}
       >
-        <MapUpdater center={[lat, lng]} zoom={zoom} />
-        <TileLayer
-          attribution={`&copy; <a href="${OPENSTREETMAP_COPYRIGHT_URL}">OpenStreetMap</a> contributors &copy; <a href="${CARTO_ATTRIBUTION_URL}">CARTO</a>`}
-          url={CARTO_BASEMAP_URL}
-        />
-        <Marker position={[lat, lng]} />
-      </MapContainer>
+        <Marker longitude={lng} latitude={lat} />
+      </MapLibreMap>
     </div>
   );
 }

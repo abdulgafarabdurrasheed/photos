@@ -1,13 +1,16 @@
 "use client";
-import L from "leaflet";
+import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
+import MapLibreMap, {
+  type MapRef,
+  Marker,
+  NavigationControl,
+  Popup,
+} from "react-map-gl/maplibre";
 import useSupercluster from "use-supercluster";
 import { logger } from "@/lib/client-logger";
-import "leaflet/dist/leaflet.css";
-import "leaflet-defaulticon-compatibility";
-import "leaflet-defaulticon-compatibility/dist/leaflet-defaulticon-compatibility.css";
-import Image from "next/image";
+import "maplibre-gl/dist/maplibre-gl.css";
+import "@/lib/maplibre-worker";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
@@ -19,11 +22,7 @@ import {
 } from "react-icons/hi2";
 import LoadingQuip from "@/components/ui/LoadingQuip";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
-import {
-  CARTO_ATTRIBUTION_URL,
-  CARTO_BASEMAP_URL,
-  OPENSTREETMAP_COPYRIGHT_URL,
-} from "@/lib/constants";
+import { OPENFREEMAP_DARK_STYLE_URL } from "@/lib/constants";
 
 type ViewMode = "photos" | "events";
 interface Photo {
@@ -64,67 +63,25 @@ interface MapData {
   photos: Photo[];
   events: EventLocation[];
 }
-function MapBoundsHandler({
-  points,
-  onBoundsChange,
-  urlLat,
-  urlLng,
-  urlZoom,
-}: {
-  points: GeoJSON.Feature<GeoJSON.Point, any>[];
-  onBoundsChange: (
-    bounds: [number, number, number, number],
-    zoom: number,
-  ) => void;
-  urlLat?: number;
-  urlLng?: number;
-  urlZoom?: number;
-}) {
-  const map = useMap();
-  const hasFitBounds = useRef(false);
-  const hasSetUrlPosition = useRef(false);
-  useEffect(() => {
-    if (urlLat && urlLng && map && !hasSetUrlPosition.current) {
-      map.setView([urlLat, urlLng], urlZoom || 15, { animate: true });
-      hasSetUrlPosition.current = true;
-      hasFitBounds.current = true;
-    }
-  }, [urlLat, urlLng, urlZoom, map]);
-  useEffect(() => {
-    if (points.length > 0 && map && !hasFitBounds.current && !urlLat) {
-      const bounds = L.latLngBounds(
-        points.map((p) => [
-          p.geometry.coordinates[1],
-          p.geometry.coordinates[0],
-        ]),
-      );
-      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 12 });
-      hasFitBounds.current = true;
-    }
-  }, [points, map, urlLat]);
-  useEffect(() => {
-    const updateBounds = () => {
-      const bounds = map.getBounds();
-      const zoom = map.getZoom();
-      onBoundsChange(
-        [
-          bounds.getWest(),
-          bounds.getSouth(),
-          bounds.getEast(),
-          bounds.getNorth(),
-        ],
-        zoom,
-      );
-    };
-    map.on("moveend", updateBounds);
-    map.on("zoomend", updateBounds);
-    updateBounds();
-    return () => {
-      map.off("moveend", updateBounds);
-      map.off("zoomend", updateBounds);
-    };
-  }, [map, onBoundsChange]);
-  return null;
+type MarkerIconOptions = {
+  html: string;
+  className?: string;
+  iconSize: [number, number];
+};
+function escapeMapImageUrl(url: string) {
+  return url.replace(/[^a-zA-Z0-9/:?&=.%#+_-]/g, (character) =>
+    encodeURIComponent(character),
+  );
+}
+function renderMarkerIcon({ html, className, iconSize }: MarkerIconOptions) {
+  return (
+    <div
+      className={className}
+      style={{ width: iconSize[0], height: iconSize[1] }}
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: fixed marker templates only interpolate escaped image URLs and numeric values.
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 export default function PhotoMap() {
   const searchParams = useSearchParams();
@@ -136,7 +93,10 @@ export default function PhotoMap() {
   const [zoom, setZoom] = useState(2);
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const [viewMode, setViewMode] = useState<ViewMode>("photos");
-  const mapRef = useRef<L.Map | null>(null);
+  const mapRef = useRef<MapRef | null>(null);
+  const hasFitBounds = useRef(false);
+  const hasSetUrlPosition = useRef(false);
+  const [mapReady, setMapReady] = useState(false);
   const urlLatParsed = searchParams.get("lat")
     ? parseFloat(searchParams.get("lat")!)
     : undefined;
@@ -254,6 +214,44 @@ export default function PhotoMap() {
     },
   });
   useEffect(() => {
+    if (
+      !mapReady ||
+      urlLat === undefined ||
+      urlLng === undefined ||
+      hasSetUrlPosition.current
+    ) {
+      return;
+    }
+    mapRef.current?.flyTo({
+      center: [urlLng, urlLat],
+      zoom: urlZoom ?? 15,
+      essential: true,
+    });
+    hasSetUrlPosition.current = true;
+    hasFitBounds.current = true;
+  }, [mapReady, urlLat, urlLng, urlZoom]);
+  useEffect(() => {
+    if (
+      !mapReady ||
+      points.length === 0 ||
+      hasFitBounds.current ||
+      urlLat !== undefined
+    ) {
+      return;
+    }
+    const coordinates = points.map((point) => point.geometry.coordinates);
+    const longitudes = coordinates.map(([longitude]) => longitude);
+    const latitudes = coordinates.map(([, latitude]) => latitude);
+    mapRef.current?.fitBounds(
+      [
+        [Math.min(...longitudes), Math.min(...latitudes)],
+        [Math.max(...longitudes), Math.max(...latitudes)],
+      ],
+      { padding: 50, maxZoom: 12 },
+    );
+    hasFitBounds.current = true;
+  }, [mapReady, points, urlLat]);
+  useEffect(() => {
     if (!clusters || !supercluster) return;
     const allVisiblePhotos: Photo[] = [];
     clusters.forEach((cluster) => {
@@ -303,8 +301,9 @@ export default function PhotoMap() {
         const url = photo.thumbnailUrl || photoUrls[photo.id] || null;
         const offset = index * 3;
         const zIndex = maxPhotos - index;
+        const safeUrl = url ? escapeMapImageUrl(url) : null;
         const background = url
-          ? `url('${url}') center/cover`
+          ? `url('${safeUrl}') center/cover`
           : "linear-gradient(135deg, #dc2626 0%, #991b1b 100%)";
         return `<div class="cluster-photo" style="
 				position: absolute;
@@ -343,7 +342,7 @@ export default function PhotoMap() {
 		">${pointCount}</div>`
         : "";
     const containerSize = baseSize + (maxPhotos - 1) * 3;
-    return L.divIcon({
+    return renderMarkerIcon({
       html: `<div class="cluster-marker" style="
 				position: relative;
 				width: ${containerSize}px;
@@ -355,14 +354,13 @@ export default function PhotoMap() {
 			</div>`,
       className: "",
       iconSize: [containerSize, containerSize],
-      iconAnchor: [containerSize / 2, containerSize],
     });
   };
   const createPhotoIcon = (photo: Photo) => {
     const thumbnailUrl = photo.thumbnailUrl || photoUrls[photo.id] || null;
     const isVideo = photo.mimeType.startsWith("video/");
     if (!thumbnailUrl) {
-      return L.divIcon({
+      return renderMarkerIcon({
         html: `<div class="photo-marker" style="
 					width: 50px;
 					height: 50px;
@@ -383,15 +381,14 @@ export default function PhotoMap() {
 				</div>`,
         className: "",
         iconSize: [50, 50],
-        iconAnchor: [25, 50],
       });
     }
-    return L.divIcon({
+    return renderMarkerIcon({
       html: `<div class="photo-marker" style="
 				width: 60px;
 				height: 60px;
 				border-radius: 8px;
-				background: url('${thumbnailUrl}') center/cover;
+              background: url('${escapeMapImageUrl(thumbnailUrl)}') center/cover;
 				box-shadow: 0 4px 8px rgba(0,0,0,0.4);
 				border: 3px solid white;
 				position: relative;
@@ -422,8 +419,6 @@ export default function PhotoMap() {
 			</div>`,
       className: "",
       iconSize: [60, 60],
-      iconAnchor: [30, 60],
-      popupAnchor: [0, -60],
     });
   };
   const createEventIcon = (event: EventLocation) => {
@@ -432,11 +427,12 @@ export default function PhotoMap() {
     const photoGrid = photosToShow
       .map((photo, index) => {
         const url = photo.thumbnailUrl || photoUrls[photo.id] || null;
+        const safeUrl = url ? escapeMapImageUrl(url) : null;
         const row = Math.floor(index / 3);
         const col = index % 3;
         const size = 20;
         const background = url
-          ? `url('${url}') center/cover`
+          ? `url('${safeUrl}') center/cover`
           : "linear-gradient(135deg, #dc2626 0%, #991b1b 100%)";
         return `<div style="
 				position: absolute;
@@ -469,7 +465,7 @@ export default function PhotoMap() {
 			z-index: 100;
 		">${totalPhotos}</div>`
         : "";
-    return L.divIcon({
+    return renderMarkerIcon({
       html: `<div style="
 				position: relative;
 				width: ${gridSize}px;
@@ -484,8 +480,6 @@ export default function PhotoMap() {
 			</div>`,
       className: "event-grid-marker",
       iconSize: [gridSize, gridSize],
-      iconAnchor: [gridSize / 2, gridSize / 2],
-      popupAnchor: [0, -gridSize / 2],
     });
   };
   if (loading) {
@@ -531,29 +525,37 @@ export default function PhotoMap() {
   }
   return (
     <div className="h-full w-full relative z-0">
-      <MapContainer
-        center={[20, 0]}
-        zoom={2}
+      <MapLibreMap
+        ref={mapRef}
+        initialViewState={{
+          longitude: urlLng ?? 0,
+          latitude: urlLat ?? 20,
+          zoom: urlZoom ?? 2,
+        }}
+        mapStyle={OPENFREEMAP_DARK_STYLE_URL}
+        maxZoom={20}
+        attributionControl={{ compact: false }}
         style={{
           height: "100%",
           width: "100%",
           background: "#09090b",
           zIndex: 0,
         }}
-        ref={mapRef}
+        onLoad={() => setMapReady(true)}
+        onMoveEnd={({ target }) => {
+          const mapBounds = target.getBounds();
+          handleBoundsChange(
+            [
+              mapBounds.getWest(),
+              mapBounds.getSouth(),
+              mapBounds.getEast(),
+              mapBounds.getNorth(),
+            ],
+            target.getZoom(),
+          );
+        }}
       >
-        <TileLayer
-          attribution={`&copy; <a href="${OPENSTREETMAP_COPYRIGHT_URL}">OpenStreetMap</a> contributors &copy; <a href="${CARTO_ATTRIBUTION_URL}">CARTO</a>`}
-          url={CARTO_BASEMAP_URL}
-        />
-
-        <MapBoundsHandler
-          points={points as GeoJSON.Feature<GeoJSON.Point, any>[]}
-          onBoundsChange={handleBoundsChange}
-          urlLat={urlLat}
-          urlLng={urlLng}
-          urlZoom={urlZoom}
-        />
+        <NavigationControl position="top-right" showCompass={false} />
 
         {clusters?.map((cluster) => {
           const [longitude, latitude] = cluster.geometry.coordinates;
@@ -563,28 +565,27 @@ export default function PhotoMap() {
             return (
               <Marker
                 key={`cluster-${cluster.id}`}
-                position={[latitude, longitude]}
-                icon={createClusterIcon(pointCount, cluster.id as number)}
-                eventHandlers={{
-                  click: () => {
-                    if (supercluster && mapRef.current) {
-                      const expansionZoom = Math.min(
-                        supercluster.getClusterExpansionZoom(
-                          cluster.id as number,
-                        ),
-                        20,
-                      );
-                      mapRef.current.setView(
-                        [latitude, longitude],
-                        expansionZoom,
-                        {
-                          animate: true,
-                        },
-                      );
-                    }
-                  },
+                longitude={longitude}
+                latitude={latitude}
+                anchor="bottom"
+                onClick={() => {
+                  if (supercluster && mapRef.current) {
+                    const expansionZoom = Math.min(
+                      supercluster.getClusterExpansionZoom(
+                        cluster.id as number,
+                      ),
+                      20,
+                    );
+                    mapRef.current.flyTo({
+                      center: [longitude, latitude],
+                      zoom: expansionZoom,
+                      essential: true,
+                    });
+                  }
                 }}
-              />
+              >
+                {createClusterIcon(pointCount, cluster.id as number)}
+              </Marker>
             );
           }
           if (cluster.properties.type === "photo") {
@@ -592,10 +593,16 @@ export default function PhotoMap() {
             return (
               <Marker
                 key={`photo-${photo.id}`}
-                position={[latitude, longitude]}
-                icon={createPhotoIcon(photo)}
+                longitude={longitude}
+                latitude={latitude}
+                anchor="bottom"
               >
-                <Popup maxWidth={250}>
+                {createPhotoIcon(photo)}
+                <Popup
+                  longitude={longitude}
+                  latitude={latitude}
+                  maxWidth="250px"
+                >
                   <div className="min-w-45 sm:min-w-50">
                     {(photo.thumbnailUrl || photoUrls[photo.id]) && (
                       <div className="relative mb-2 rounded-lg overflow-hidden">
@@ -648,10 +655,16 @@ export default function PhotoMap() {
             return (
               <Marker
                 key={`event-${event.id}`}
-                position={[latitude, longitude]}
-                icon={createEventIcon(event)}
+                longitude={longitude}
+                latitude={latitude}
+                anchor="center"
               >
-                <Popup maxWidth={280}>
+                {createEventIcon(event)}
+                <Popup
+                  longitude={longitude}
+                  latitude={latitude}
+                  maxWidth="280px"
+                >
                   <div className="min-w-60 sm:min-w-70">
                     <p className="font-semibold text-sm sm:text-base mb-2 truncate">
                       {event.name}
@@ -717,7 +730,7 @@ export default function PhotoMap() {
           }
           return null;
         })}
-      </MapContainer>
+      </MapLibreMap>
 
       <div className="absolute bottom-3 sm:bottom-6 left-3 sm:left-6 z-10 flex gap-1 sm:gap-2 bg-[#1a1a1a]/90 backdrop-blur-sm rounded-full p-0.5 sm:p-1 shadow-lg border border-zinc-800">
         <button

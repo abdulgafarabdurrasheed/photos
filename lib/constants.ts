@@ -16,11 +16,8 @@ export const DICEBEAR_API_URL = "https://api.dicebear.com/9.x/notionists";
 export const GRAVATAR_URL = "https://www.gravatar.com/avatar";
 export const LIBRAVATAR_URL = "https://seccdn.libravatar.org/avatar";
 export const NOMINATIM_API_URL = "https://nominatim.openstreetmap.org";
-export const OPENSTREETMAP_COPYRIGHT_URL =
-  "https://www.openstreetmap.org/copyright";
-export const CARTO_ATTRIBUTION_URL = "https://carto.com/attributions";
-export const CARTO_BASEMAP_URL =
-  "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+export const OPENFREEMAP_DARK_STYLE_URL =
+  "https://tiles.openfreemap.org/styles/dark";
 export const SOCIAL_URLS = {
   GITHUB: "https://github.com/",
   X: "https://x.com/",
