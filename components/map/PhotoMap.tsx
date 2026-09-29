@@ -25,6 +25,7 @@ import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import { OPENFREEMAP_DARK_STYLE_URL } from "@/lib/constants";
 
 type ViewMode = "photos" | "events";
+type SelectedMarker = { type: "photo" | "event"; id: string } | null;
 interface Photo {
   id: string;
   filename: string;
@@ -93,6 +94,7 @@ export default function PhotoMap() {
   const [zoom, setZoom] = useState(2);
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const [viewMode, setViewMode] = useState<ViewMode>("photos");
+  const [selectedMarker, setSelectedMarker] = useState<SelectedMarker>(null);
   const mapRef = useRef<MapRef | null>(null);
   const hasFitBounds = useRef(false);
   const hasSetUrlPosition = useRef(false);
@@ -576,10 +578,11 @@ export default function PhotoMap() {
                       ),
                       20,
                     );
-                    mapRef.current.flyTo({
+                    setSelectedMarker(null);
+                    mapRef.current.easeTo({
                       center: [longitude, latitude],
                       zoom: expansionZoom,
-                      essential: true,
+                      duration: 300,
                     });
                   }
                 }}
@@ -596,146 +599,171 @@ export default function PhotoMap() {
                 longitude={longitude}
                 latitude={latitude}
                 anchor="bottom"
+                onClick={() =>
+                  setSelectedMarker({ type: "photo", id: photo.id })
+                }
               >
                 {createPhotoIcon(photo)}
-                <Popup
-                  longitude={longitude}
-                  latitude={latitude}
-                  maxWidth="250px"
-                >
-                  <div className="min-w-45 sm:min-w-50">
-                    {(photo.thumbnailUrl || photoUrls[photo.id]) && (
-                      <div className="relative mb-2 rounded-lg overflow-hidden">
-                        <Image
-                          src={photo.thumbnailUrl || photoUrls[photo.id]}
-                          alt={photo.filename}
-                          width={200}
-                          height={150}
-                          unoptimized={photo.event?.visibility !== "public"}
-                          className="w-full h-auto"
-                        />
-                        {photo.mimeType.startsWith("video/") && (
-                          <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-30">
-                            <HiPlay className="text-white text-3xl sm:text-4xl" />
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    <p className="font-medium text-xs sm:text-sm mb-1 truncate">
-                      {photo.filename}
-                    </p>
-                    <p className="text-[10px] sm:text-xs text-zinc-400 mb-2">
-                      {photo.mimeType.startsWith("video/") ? (
-                        <>
-                          <HiVideoCamera className="inline mr-1" />
-                          Video
-                        </>
-                      ) : (
-                        <>
-                          <HiPhoto className="inline mr-1" />
-                          Photo
-                        </>
-                      )}
-                    </p>
-                    <Link
-                      prefetch={false}
-                      href={`/events/${photo.event.slug}?photo=${photo.id}`}
-                      className="text-[10px] sm:text-xs font-medium inline-block"
-                    >
-                      View in {photo.event.name} →
-                    </Link>
-                  </div>
-                </Popup>
               </Marker>
             );
           }
           if (cluster.properties.type === "event") {
             const event = cluster.properties.event as EventLocation;
-            const eventPhotos = event.photos || [];
             return (
               <Marker
                 key={`event-${event.id}`}
                 longitude={longitude}
                 latitude={latitude}
                 anchor="center"
+                onClick={() =>
+                  setSelectedMarker({ type: "event", id: event.id })
+                }
               >
                 {createEventIcon(event)}
-                <Popup
-                  longitude={longitude}
-                  latitude={latitude}
-                  maxWidth="280px"
-                >
-                  <div className="min-w-60 sm:min-w-70">
-                    <p className="font-semibold text-sm sm:text-base mb-2 truncate">
-                      {event.name}
-                    </p>
-                    {event.city && event.country && (
-                      <p className="text-[10px] sm:text-xs text-zinc-400 mb-2 sm:mb-3 flex items-center gap-1">
-                        <HiMapPin className="shrink-0" />
-                        <span className="truncate">
-                          {event.city}, {event.country}
-                        </span>
-                      </p>
-                    )}
-
-                    {eventPhotos.length > 0 && (
-                      <div className="grid grid-cols-3 gap-1 mb-2 sm:mb-3 max-h-37.5 sm:max-h-45 overflow-hidden">
-                        {eventPhotos.slice(0, 9).map((photo) => {
-                          const url =
-                            photo.thumbnailUrl || photoUrls[photo.id] || null;
-                          return (
-                            <div
-                              key={photo.id}
-                              className="aspect-square bg-zinc-800 rounded-lg overflow-hidden relative"
-                            >
-                              {url && (
-                                <Image
-                                  src={url}
-                                  alt={photo.filename}
-                                  fill
-                                  unoptimized={event.visibility !== "public"}
-                                  sizes="200px"
-                                  className="object-cover"
-                                />
-                              )}
-                              {photo.mimeType.startsWith("video/") && (
-                                <div className="absolute inset-0 flex items-center justify-center">
-                                  <div className="bg-black bg-opacity-60 rounded-full p-1">
-                                    <HiPlay className="text-white text-xs" />
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    <div className="text-[10px] sm:text-xs text-zinc-400 mb-1 sm:mb-2">
-                      {eventPhotos.length}{" "}
-                      {eventPhotos.length === 1 ? "photo" : "photos"}
-                    </div>
-
-                    <Link
-                      prefetch={false}
-                      href={`/events/${event.slug}`}
-                      className="text-[10px] sm:text-xs font-medium inline-block"
-                    >
-                      View Event →
-                    </Link>
-                  </div>
-                </Popup>
               </Marker>
             );
           }
           return null;
         })}
+
+        {selectedMarker?.type === "photo" &&
+          mapData.photos
+            .filter((photo) => photo.id === selectedMarker.id)
+            .map((photo) => (
+              <Popup
+                key={`photo-${photo.id}`}
+                longitude={Number(photo.lng)}
+                latitude={Number(photo.lat)}
+                offset={30}
+                onClose={() => setSelectedMarker(null)}
+                maxWidth="250px"
+              >
+                <div className="min-w-45 sm:min-w-50">
+                  {(photo.thumbnailUrl || photoUrls[photo.id]) && (
+                    <div className="relative mb-2 rounded-lg overflow-hidden">
+                      <Image
+                        src={photo.thumbnailUrl || photoUrls[photo.id]}
+                        alt={photo.filename}
+                        width={200}
+                        height={150}
+                        unoptimized={photo.event?.visibility !== "public"}
+                        className="w-full h-auto"
+                      />
+                      {photo.mimeType.startsWith("video/") && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-30">
+                          <HiPlay className="text-white text-3xl sm:text-4xl" />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <p className="font-medium text-xs sm:text-sm mb-1 truncate">
+                    {photo.filename}
+                  </p>
+                  <p className="text-[10px] sm:text-xs text-zinc-400 mb-2">
+                    {photo.mimeType.startsWith("video/") ? (
+                      <>
+                        <HiVideoCamera className="inline mr-1" />
+                        Video
+                      </>
+                    ) : (
+                      <>
+                        <HiPhoto className="inline mr-1" />
+                        Photo
+                      </>
+                    )}
+                  </p>
+                  <Link
+                    prefetch={false}
+                    href={`/events/${photo.event.slug}?photo=${photo.id}`}
+                    className="text-[10px] sm:text-xs font-medium inline-block"
+                  >
+                    View in {photo.event.name} →
+                  </Link>
+                </div>
+              </Popup>
+            ))}
+        {selectedMarker?.type === "event" &&
+          mapData.events
+            .filter((event) => event.id === selectedMarker.id)
+            .map((event) => (
+              <Popup
+                key={`event-${event.id}`}
+                longitude={Number(event.lng)}
+                latitude={Number(event.lat)}
+                offset={30}
+                onClose={() => setSelectedMarker(null)}
+                maxWidth="280px"
+              >
+                <div className="min-w-60 sm:min-w-70">
+                  <p className="font-semibold text-sm sm:text-base mb-2 truncate">
+                    {event.name}
+                  </p>
+                  {event.city && event.country && (
+                    <p className="text-[10px] sm:text-xs text-zinc-400 mb-2 sm:mb-3 flex items-center gap-1">
+                      <HiMapPin className="shrink-0" />
+                      <span className="truncate">
+                        {event.city}, {event.country}
+                      </span>
+                    </p>
+                  )}
+
+                  {(event.photos?.length ?? 0) > 0 && (
+                    <div className="grid grid-cols-3 gap-1 mb-2 sm:mb-3 max-h-37.5 sm:max-h-45 overflow-hidden">
+                      {event.photos?.slice(0, 9).map((photo) => {
+                        const url =
+                          photo.thumbnailUrl || photoUrls[photo.id] || null;
+                        return (
+                          <div
+                            key={photo.id}
+                            className="aspect-square bg-zinc-800 rounded-lg overflow-hidden relative"
+                          >
+                            {url && (
+                              <Image
+                                src={url}
+                                alt={photo.filename}
+                                fill
+                                unoptimized={event.visibility !== "public"}
+                                sizes="200px"
+                                className="object-cover"
+                              />
+                            )}
+                            {photo.mimeType.startsWith("video/") && (
+                              <div className="absolute inset-0 flex items-center justify-center">
+                                <div className="bg-black bg-opacity-60 rounded-full p-1">
+                                  <HiPlay className="text-white text-xs" />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="text-[10px] sm:text-xs text-zinc-400 mb-1 sm:mb-2">
+                    {event.photos?.length ?? 0}{" "}
+                    {event.photos?.length === 1 ? "photo" : "photos"}
+                  </div>
+
+                  <Link
+                    prefetch={false}
+                    href={`/events/${event.slug}`}
+                    className="text-[10px] sm:text-xs font-medium inline-block"
+                  >
+                    View Event →
+                  </Link>
+                </div>
+              </Popup>
+            ))}
       </MapLibreMap>
 
       <div className="absolute bottom-3 sm:bottom-6 left-3 sm:left-6 z-10 flex gap-1 sm:gap-2 bg-[#1a1a1a]/90 backdrop-blur-sm rounded-full p-0.5 sm:p-1 shadow-lg border border-zinc-800">
         <button
           type="button"
-          onClick={() => setViewMode("photos")}
+          onClick={() => {
+            setSelectedMarker(null);
+            setViewMode("photos");
+          }}
           className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-full text-xs sm:text-sm font-medium transition-all flex items-center gap-1 sm:gap-2 ${
             viewMode === "photos"
               ? "bg-red-600 text-white"
@@ -747,7 +775,10 @@ export default function PhotoMap() {
         </button>
         <button
           type="button"
-          onClick={() => setViewMode("events")}
+          onClick={() => {
+            setSelectedMarker(null);
+            setViewMode("events");
+          }}
           className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-full text-xs sm:text-sm font-medium transition-all flex items-center gap-1 sm:gap-2 ${
             viewMode === "events"
               ? "bg-red-600 text-white"

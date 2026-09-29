@@ -1,5 +1,4 @@
-import { getVersion, setWorkerUrl } from "maplibre-gl";
+import { setWorkerUrl } from "maplibre-gl";
 
-setWorkerUrl(
-  `https://cdn.jsdelivr.net/npm/maplibre-gl@${getVersion()}/dist/maplibre-gl-worker.mjs`,
-);
+// Keep this in sync with the worker and shared module copied to public/maplibre/.
+setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
