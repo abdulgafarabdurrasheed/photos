@@ -408,8 +408,8 @@ export default function OnboardingPage() {
                 <div className="flex items-start gap-3 text-xs text-zinc-400">
                   <HiDocumentText className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
                   <span>
-                    By continuing, you agree to the Privacy Policy and Code of
-                    Conduct.
+                    By continuing, you agree to the <a href="https://hackclub.com/privacy-and-terms">Privacy Policy</a> and <a href="https://hackclub.com/conduct">Code of
+                    Conduct.</a>
                   </span>
                 </div>
               </div>
