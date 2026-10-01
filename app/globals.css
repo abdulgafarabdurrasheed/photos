@@ -298,39 +298,24 @@ textarea {
   }
 }
 
-@keyframes popIn {
-  0% {
-    opacity: 0;
-    transform: scale(0.9) translateY(20px);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-  }
+.feed-card-grid > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
 }
 
-@keyframes scaleIn {
-  from {
-    opacity: 0;
-    transform: scale(0.9);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
+.gallery-virtual-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
 }
 
-.lazy-load-image-background {
-  display: block;
+::view-transition-old(*),
+::view-transition-new(*) {
+  animation-duration: 180ms;
 }
 
-.lazy-load-image-background.blur {
-  filter: blur(15px);
-  transition: filter 0.3s;
-}
-
-.lazy-load-image-background.blur.lazy-load-image-loaded {
-  filter: blur(0);
+::view-transition-group(*) {
+  animation-duration: 280ms;
+  animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
 @keyframes scroll-left {

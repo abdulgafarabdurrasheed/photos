@@ -7,6 +7,8 @@ import {
   mediaLikes,
   users,
 } from "@/lib/db/schema";
+import { slimExifData } from "@/lib/media/client-media";
+import { getMediaDisplayUrl, getMediaThumbnailUrl } from "@/lib/media/urls";
 import { filterDeletableMedia } from "@/lib/policy";
 import { getSlackAvatarUrl, getUserDisplayName } from "@/lib/user-display";
 export type FeedItem = {
@@ -29,11 +31,14 @@ export type FeedItem = {
   media?: {
     id: string;
     filename: string;
-    s3Url: string;
+    s3Url?: string;
     mimeType: string;
     width: number | null;
     height: number | null;
     thumbnailS3Key?: string | null;
+    thumbnailUrl?: string | null;
+    displayUrl?: string | null;
+    displayAvifUrl?: string | null;
     exifData: Record<string, unknown> | null;
     uploadedAt: Date;
     uploadedBy: {
@@ -164,7 +169,6 @@ export async function fetchFeedItems(
           .select({
             id: media.id,
             filename: media.filename,
-            s3Url: media.s3Url,
             mimeType: media.mimeType,
             width: media.width,
             height: media.height,
@@ -247,12 +251,18 @@ export async function fetchFeedItems(
           ? {
               id: mediaItem.id,
               filename: mediaItem.filename,
-              s3Url: mediaItem.s3Url,
               mimeType: mediaItem.mimeType,
               width: mediaItem.width,
               height: mediaItem.height,
               thumbnailS3Key: mediaItem.thumbnailS3Key,
-              exifData: mediaItem.exifData as Record<string, unknown> | null,
+              thumbnailUrl: getMediaThumbnailUrl(mediaItem.id, "md"),
+              displayUrl: mediaItem.mimeType.startsWith("image/")
+                ? getMediaDisplayUrl(mediaItem.id)
+                : null,
+              displayAvifUrl: mediaItem.mimeType.startsWith("image/")
+                ? getMediaDisplayUrl(mediaItem.id, "avif")
+                : null,
+              exifData: slimExifData(mediaItem.exifData),
               uploadedAt: mediaItem.uploadedAt,
               uploadedBy: {
                 id: mediaItem.uploadedById,
@@ -292,12 +302,18 @@ export async function fetchFeedItems(
           ? {
               id: mediaItem.id,
               filename: mediaItem.filename,
-              s3Url: mediaItem.s3Url,
               mimeType: mediaItem.mimeType,
               width: mediaItem.width,
               height: mediaItem.height,
               thumbnailS3Key: mediaItem.thumbnailS3Key,
-              exifData: mediaItem.exifData as Record<string, unknown> | null,
+              thumbnailUrl: getMediaThumbnailUrl(mediaItem.id, "md"),
+              displayUrl: mediaItem.mimeType.startsWith("image/")
+                ? getMediaDisplayUrl(mediaItem.id)
+                : null,
+              displayAvifUrl: mediaItem.mimeType.startsWith("image/")
+                ? getMediaDisplayUrl(mediaItem.id, "avif")
+                : null,
+              exifData: slimExifData(mediaItem.exifData),
               uploadedAt: mediaItem.uploadedAt,
               uploadedBy: {
                 id: mediaItem.uploadedById,
@@ -332,12 +348,18 @@ export async function fetchFeedItems(
           ? {
               id: mediaItem.id,
               filename: mediaItem.filename,
-              s3Url: mediaItem.s3Url,
               mimeType: mediaItem.mimeType,
               width: mediaItem.width,
               height: mediaItem.height,
               thumbnailS3Key: mediaItem.thumbnailS3Key,
-              exifData: mediaItem.exifData as Record<string, unknown> | null,
+              thumbnailUrl: getMediaThumbnailUrl(mediaItem.id, "md"),
+              displayUrl: mediaItem.mimeType.startsWith("image/")
+                ? getMediaDisplayUrl(mediaItem.id)
+                : null,
+              displayAvifUrl: mediaItem.mimeType.startsWith("image/")
+                ? getMediaDisplayUrl(mediaItem.id, "avif")
+                : null,
+              exifData: slimExifData(mediaItem.exifData),
               uploadedAt: mediaItem.uploadedAt,
               uploadedBy: {
                 id: mediaItem.uploadedById,

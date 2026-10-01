@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { and, eq, inArray, or } from "drizzle-orm";
 import { revalidatePath, revalidateTag } from "next/cache";
+import { after } from "next/server";
 import { broadcastPhotoDeleted } from "@/app/api/feed/stream/route";
 import { auditLog } from "@/lib/audit";
 import { getSession } from "@/lib/auth";
@@ -656,10 +657,49 @@ export async function deleteMedia(mediaId: string) {
     }
     revalidatePath(`/events/${mediaItem.eventId}`);
     revalidatePath("/users/[username]", "page");
-    broadcastPhotoDeleted(mediaId);
+    after(async () => {
+      await broadcastPhotoDeleted(mediaId).catch((error) => {
+        logger.error("Failed to broadcast photo deletion:", error);
+      });
+    });
     return { success: true };
   } catch (error) {
     logger.error("Error deleting media:", error);
     return { success: false, error: "Failed to delete media" };
+  }
+}
+
+export async function getMediaExifData(mediaId: string) {
+  try {
+    const session = await getSession();
+    const user = await getUserContext(session?.id);
+    const mediaItem = await db.query.media.findFirst({
+      where: eq(media.id, mediaId),
+      columns: {
+        id: true,
+        exifData: true,
+        eventId: true,
+        blurStatus: true,
+      },
+      with: {
+        event: true,
+      },
+    });
+    if (!mediaItem) {
+      return { success: false as const, error: "Media not found" };
+    }
+    const isPublic = mediaItem.event?.visibility === "public";
+    if (!isPublic) {
+      if (!user || !(await can(user, "view", "media", mediaItem))) {
+        return { success: false as const, error: "Forbidden" };
+      }
+    }
+    return {
+      success: true as const,
+      exifData: (mediaItem.exifData ?? null) as Record<string, unknown> | null,
+    };
+  } catch (error) {
+    logger.error("Error fetching media EXIF:", error);
+    return { success: false as const, error: "Failed to fetch media details" };
   }
 }

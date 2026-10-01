@@ -7,6 +7,7 @@ import {
   pendingSeriesAdmins,
   seriesAdmins,
 } from "@/lib/db/schema";
+import { invalidateUserContext } from "@/lib/policy";
 
 async function ensureEventAdmin(eventId: string, userId: string) {
   const existing = await db.query.eventAdmins.findFirst({
@@ -18,6 +19,7 @@ async function ensureEventAdmin(eventId: string, userId: string) {
   });
   if (!existing) {
     await db.insert(eventAdmins).values({ eventId, userId });
+    invalidateUserContext(userId);
   }
 }
 
@@ -31,6 +33,7 @@ async function ensureSeriesAdmin(seriesId: string, userId: string) {
   });
   if (!existing) {
     await db.insert(seriesAdmins).values({ seriesId, userId });
+    invalidateUserContext(userId);
   }
 }
 

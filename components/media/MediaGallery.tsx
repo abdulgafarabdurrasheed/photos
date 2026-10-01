@@ -1,16 +1,13 @@
 "use client";
 import dynamic from "next/dynamic";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   HiArrowDownTray,
   HiArrowPath,
   HiCalendar,
-  HiCheck,
   HiClock,
   HiHeart,
-  HiPhoto,
   HiTrash,
   HiUser,
 } from "react-icons/hi2";
@@ -19,111 +16,26 @@ import { deleteMedia, getDownloadUrl } from "@/app/actions/media";
 import IncludesMeDrawer from "@/components/face/IncludesMeDrawer";
 import { useMediaGalleryData } from "@/hooks/useMediaGallery";
 import { logger } from "@/lib/client-logger";
-import { resolveMediaDate } from "@/lib/media/exif";
+import { startViewTransition } from "@/lib/view-transition";
 import type { Event, MediaItem } from "@/types/media";
 import ConfirmModal from "../ui/ConfirmModal";
 import ServerActionModal from "../ui/ServerActionModal";
 import ChangeOwnerModal from "./ChangeOwnerModal";
+import GalleryCell from "./GalleryCell";
 import GalleryLiveStream from "./GalleryLiveStream";
 import MediaGalleryToolbar from "./MediaGalleryToolbar";
-import OnDemandVideoThumb from "./OnDemandVideoThumb";
-import VideoIndicator from "./VideoIndicator";
+import VirtualGalleryGrid from "./VirtualGalleryGrid";
 
 const PhotoDetailModal = dynamic(() => import("./PhotoDetailModal"), {
   ssr: false,
 });
 
-const INITIAL_VISIBLE_ITEMS = 60;
-const VISIBLE_ITEMS_INCREMENT = 60;
-const THUMBNAIL_AUTO_RETRIES = 5;
+let modalChunkPreloaded = false;
 
-let galleryImageObserver: IntersectionObserver | null = null;
-
-function getGalleryImageObserver() {
-  if (typeof window === "undefined") return null;
-  if (galleryImageObserver) return galleryImageObserver;
-  galleryImageObserver = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const element = entry.target as HTMLElement;
-        galleryImageObserver?.unobserve(element);
-        element.dispatchEvent(new CustomEvent("gallery-image-visible"));
-      }
-    },
-    { rootMargin: "900px 0px" },
-  );
-  return galleryImageObserver;
-}
-
-function LazyGalleryImage({
-  src,
-  alt,
-  optimize,
-}: {
-  src?: string;
-  alt: string;
-  optimize: boolean;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [isVisible, setIsVisible] = useState(false);
-  const [isLoaded, setIsLoaded] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-
-  useEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    const observer = getGalleryImageObserver();
-
-    const handleVisible = () => {
-      setIsVisible(true);
-    };
-
-    element.addEventListener("gallery-image-visible", handleVisible, {
-      once: true,
-    });
-    observer?.observe(element);
-    return () => {
-      element.removeEventListener("gallery-image-visible", handleVisible);
-      observer?.unobserve(element);
-    };
-  }, []);
-
-  return (
-    <div ref={ref} className="relative h-full w-full bg-zinc-800">
-      {(!isVisible || !src || !isLoaded) && (
-        <div className="absolute inset-0 flex items-center justify-center bg-zinc-800">
-          <HiPhoto className="w-12 h-12 text-zinc-600 animate-pulse" />
-        </div>
-      )}
-      {isVisible && src && (
-        <Image
-          src={
-            retryCount > 0
-              ? `${src}${src.includes("?") ? "&" : "?"}retry=${retryCount}`
-              : src
-          }
-          alt={alt}
-          fill
-          unoptimized={!optimize}
-          sizes="(max-width: 767px) 50vw, 240px"
-          key={`${src}-${retryCount}`}
-          className={`object-cover transition-opacity duration-700 ease-out ${
-            isLoaded ? "opacity-100" : "opacity-0"
-          }`}
-          onLoad={() => setIsLoaded(true)}
-          onError={() => {
-            setIsLoaded(false);
-            if (retryCount >= THUMBNAIL_AUTO_RETRIES) return;
-            window.setTimeout(
-              () => setRetryCount((count) => count + 1),
-              350 * (retryCount + 1),
-            );
-          }}
-        />
-      )}
-    </div>
-  );
+function preloadModalChunk() {
+  if (modalChunkPreloaded) return;
+  modalChunkPreloaded = true;
+  void import("./PhotoDetailModal");
 }
 
 interface MediaGalleryProps {
@@ -184,14 +96,16 @@ export default function MediaGallery({
     dateOrder,
     setDateOrder,
     setRandomSeed,
-    getThumbnailUrl,
     selectedMedia,
     setSelectedMedia,
     selectedThumbnailUrl,
+    selectedDisplayUrl,
+    selectedDisplayAvifUrl,
     fullSizeUrl,
     refreshFullSizeUrl,
     prefetchFullSizeUrls,
     sortedMedia: unfilteredSortedMedia,
+    dateLabels,
     eventMap,
     updateUrl,
   } = useMediaGalleryData(media, events, initialPhotoId);
@@ -209,11 +123,9 @@ export default function MediaGallery({
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
   const [showChangeOwnerModal, setShowChangeOwnerModal] = useState(false);
   const [mediaToDelete, setMediaToDelete] = useState<string | null>(null);
-  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_ITEMS);
   const [faceDrawerOpen, setFaceDrawerOpen] = useState(false);
   const [includesMeActive, setIncludesMeActive] = useState(false);
   const [faceMediaIds, setFaceMediaIds] = useState<Set<string>>(new Set());
-  const [_isPending, startTransition] = useTransition();
   const router = useRouter();
   const handleLiveNewMedia = useCallback(
     (newItems: MediaItem[]) => {
@@ -233,42 +145,72 @@ export default function MediaGallery({
   const liveEnabled =
     Boolean(liveScopeType) && Boolean(liveScopeId) && !blurMode;
   const abortControllerRef = useRef<AbortController | null>(null);
-  const loadMoreRef = useRef<HTMLDivElement>(null);
-  const sortedMedia = includesMeActive
-    ? unfilteredSortedMedia.filter((item) => faceMediaIds.has(item.id))
-    : unfilteredSortedMedia;
+  const sortedMedia = useMemo(
+    () =>
+      includesMeActive
+        ? unfilteredSortedMedia.filter((item) => faceMediaIds.has(item.id))
+        : unfilteredSortedMedia,
+    [includesMeActive, faceMediaIds, unfilteredSortedMedia],
+  );
+  const mediaById = useMemo(
+    () => new Map(sortedMedia.map((item) => [item.id, item])),
+    [sortedMedia],
+  );
+  const selectedMediaIndex = useMemo(
+    () =>
+      selectedMedia
+        ? sortedMedia.findIndex((item) => item.id === selectedMedia.id)
+        : -1,
+    [sortedMedia, selectedMedia],
+  );
 
   useEffect(() => {
-    const element = loadMoreRef.current;
-    if (!element) return;
+    const idle: typeof requestIdleCallback =
+      typeof window !== "undefined" && "requestIdleCallback" in window
+        ? window.requestIdleCallback
+        : (callback) => window.setTimeout(callback, 300);
+    const handle = idle(() => preloadModalChunk());
+    return () => {
+      if ("cancelIdleCallback" in window) {
+        window.cancelIdleCallback(handle as number);
+      }
+    };
+  }, []);
 
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry.isIntersecting) return;
-        startTransition(() => {
-          setVisibleCount((count) =>
-            Math.min(count + VISIBLE_ITEMS_INCREMENT, sortedMedia.length),
-          );
-        });
-      },
-      { rootMargin: "1200px 0px" },
-    );
-
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [sortedMedia.length]);
-
-  const prefetchAdjacentMedia = (item: MediaItem) => {
-    const currentIndex = sortedMedia.findIndex((m) => m.id === item.id);
-    if (currentIndex === -1) return;
-    void prefetchFullSizeUrls(
-      [
-        sortedMedia[currentIndex - 1],
-        sortedMedia[currentIndex + 1],
-        sortedMedia[currentIndex + 2],
-      ].filter((mediaItem): mediaItem is MediaItem => Boolean(mediaItem)),
-    );
-  };
+  const prefetchAdjacentMedia = useCallback(
+    (item: MediaItem) => {
+      const currentIndex = sortedMedia.findIndex((m) => m.id === item.id);
+      if (currentIndex === -1) return;
+      void prefetchFullSizeUrls(
+        [
+          sortedMedia[currentIndex - 1],
+          sortedMedia[currentIndex + 1],
+          sortedMedia[currentIndex + 2],
+        ].filter((mediaItem): mediaItem is MediaItem => Boolean(mediaItem)),
+      );
+    },
+    [sortedMedia, prefetchFullSizeUrls],
+  );
+  const openMedia = useCallback(
+    (item: MediaItem) => {
+      startViewTransition(() => {
+        setSelectedMedia(item);
+        updateUrl(item.id);
+      });
+      prefetchAdjacentMedia(item);
+    },
+    [setSelectedMedia, updateUrl, prefetchAdjacentMedia],
+  );
+  const goToMedia = useCallback(
+    (index: number) => {
+      const nextMedia = sortedMedia[index];
+      if (!nextMedia) return;
+      setSelectedMedia(nextMedia);
+      updateUrl(nextMedia.id);
+      prefetchAdjacentMedia(nextMedia);
+    },
+    [sortedMedia, setSelectedMedia, updateUrl, prefetchAdjacentMedia],
+  );
   const handleDeleteConfirm = async () => {
     if (!mediaToDelete) return;
     try {
@@ -309,7 +251,7 @@ export default function MediaGallery({
       setDownloading(false);
     }
   };
-  const toggleSelection = (itemId: string) => {
+  const toggleSelection = useCallback((itemId: string) => {
     setSelectedItems((prev) => {
       const newSet = new Set(prev);
       if (newSet.has(itemId)) {
@@ -319,7 +261,7 @@ export default function MediaGallery({
       }
       return newSet;
     });
-  };
+  }, []);
   const selectAll = () => {
     setSelectedItems(new Set(sortedMedia.map((item) => item.id)));
   };
@@ -386,7 +328,7 @@ export default function MediaGallery({
         setDownloading(true);
         for (const itemId of selectedItems) {
           if (controller.signal.aborted) break;
-          const item = sortedMedia.find((m) => m.id === itemId);
+          const item = mediaById.get(itemId);
           if (item) {
             await handleDownload(item);
             await new Promise((resolve) => setTimeout(resolve, 200));
@@ -436,13 +378,146 @@ export default function MediaGallery({
       setDeleting(false);
     }
   };
-  const canDeleteSelection = Array.from(selectedItems).every((itemId) => {
-    const item = sortedMedia.find((m) => m.id === itemId);
+  const canDeleteSelection = useMemo(() => {
+    for (const itemId of selectedItems) {
+      const item = mediaById.get(itemId);
+      if (
+        !item ||
+        !(isAdmin || item.canDelete || item.uploadedBy.id === currentUserId)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }, [selectedItems, mediaById, isAdmin, currentUserId]);
+
+  const renderBadges = (item: MediaItem) => {
+    const event =
+      item.event || (item.eventId ? eventMap.get(item.eventId) : null);
     return (
-      item &&
-      (isAdmin || item.canDelete || item.uploadedBy.id === currentUserId)
+      <>
+        {sortBy === "date" && (
+          <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] items-center gap-1 rounded-lg bg-black/70 px-2 py-1 text-xs text-white backdrop-blur-sm">
+            <HiClock className="w-3 h-3" />
+            <span>{dateLabels.get(item.id) ?? ""}</span>
+          </div>
+        )}
+        {sortBy === "event" && event && (
+          <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 backdrop-blur-sm rounded-lg text-xs text-white flex items-center gap-1">
+            <HiCalendar className="w-3 h-3" />
+            <span className="truncate">{event.name}</span>
+          </div>
+        )}
+        {sortBy === "uploader" && (
+          <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] items-center gap-1 rounded-lg bg-black/70 px-2 py-1 text-xs text-white backdrop-blur-sm">
+            <HiUser className="w-3 h-3" />
+            <span className="truncate">
+              {item.uploadedBy?.name || "Unknown"}
+            </span>
+          </div>
+        )}
+        {sortBy === "likes" && (
+          <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 backdrop-blur-sm rounded-lg text-xs text-white flex items-center gap-1">
+            <HiHeart className="w-3 h-3" />
+            <span>{item.likeCount || 0}</span>
+          </div>
+        )}
+      </>
     );
-  });
+  };
+
+  const detailModal = selectedMedia ? (
+    <PhotoDetailModal
+      media={selectedMedia}
+      fullSizeUrl={fullSizeUrl}
+      displayUrl={selectedDisplayUrl}
+      displayAvifUrl={selectedDisplayAvifUrl}
+      thumbnailUrl={selectedThumbnailUrl}
+      onRequestFreshUrl={() => refreshFullSizeUrl(selectedMedia)}
+      event={
+        selectedMedia.event ||
+        (selectedMedia.eventId
+          ? eventMap.get(selectedMedia.eventId)
+          : undefined)
+      }
+      currentUserId={currentUserId}
+      isGlobalAdmin={isAdmin}
+      downloading={downloading}
+      onClose={() => {
+        startViewTransition(() => {
+          setSelectedMedia(null);
+          updateUrl(null);
+        });
+      }}
+      onDownload={() => handleDownload(selectedMedia)}
+      blurMode={blurMode && selectedMedia.mimeType.startsWith("image/")}
+      blurDraft={blurDrafts[selectedMedia.id]}
+      onBlurSave={blurMode ? onBlurDraft : undefined}
+      onMediaUpdate={
+        blurMode
+          ? undefined
+          : (updatedMedia) => {
+              setLocalMedia((prev) =>
+                prev.map((item) =>
+                  item.id === updatedMedia.id ? updatedMedia : item,
+                ),
+              );
+              if (selectedMedia?.id === updatedMedia.id) {
+                setSelectedMedia(updatedMedia);
+              }
+            }
+      }
+      onSuggestionResolved={
+        blurMode
+          ? undefined
+          : (status) => {
+              if (status === "rejected") {
+                setLocalMedia((current) =>
+                  current.filter((item) => item.id !== selectedMedia.id),
+                );
+                setSelectedMedia(null);
+                updateUrl(null);
+                return;
+              }
+              const updated = {
+                ...selectedMedia,
+                suggestedMention: false,
+                suggestionId: undefined,
+              };
+              setLocalMedia((current) =>
+                current.map((item) =>
+                  item.id === updated.id ? updated : item,
+                ),
+              );
+              setSelectedMedia(updated);
+            }
+      }
+      onDelete={
+        !blurMode &&
+        (selectedMedia.canDelete ||
+          currentUserId === selectedMedia.uploadedBy.id ||
+          isAdmin)
+          ? () => {
+              setMediaToDelete(selectedMedia.id);
+              setShowDeleteModal(true);
+            }
+          : undefined
+      }
+      onNext={
+        selectedMediaIndex < sortedMedia.length - 1
+          ? () => goToMedia(selectedMediaIndex + 1)
+          : undefined
+      }
+      onPrevious={
+        selectedMediaIndex > 0
+          ? () => goToMedia(selectedMediaIndex - 1)
+          : undefined
+      }
+      hasNext={selectedMediaIndex < sortedMedia.length - 1}
+      hasPrevious={selectedMediaIndex > 0}
+    />
+  ) : null;
+
   return (
     <div className="space-y-4">
       {liveEnabled ? (
@@ -557,12 +632,16 @@ export default function MediaGallery({
       {!hideControls && (
         <MediaGalleryToolbar
           filter={filter}
-          setFilter={setFilter}
+          setFilter={(value) => startViewTransition(() => setFilter(value))}
           sortBy={sortBy}
-          setSortBy={setSortBy}
+          setSortBy={(value) => startViewTransition(() => setSortBy(value))}
           dateOrder={dateOrder}
-          setDateOrder={setDateOrder}
-          setRandomSeed={setRandomSeed}
+          setDateOrder={(value) =>
+            startViewTransition(() => setDateOrder(value))
+          }
+          setRandomSeed={(value) =>
+            startViewTransition(() => setRandomSeed(value))
+          }
           selectionMode={selectionMode}
           setSelectionMode={setSelectionMode}
           showUploaderFilter={showUploaderFilter}
@@ -588,281 +667,35 @@ export default function MediaGallery({
         </div>
       ) : null}
 
-      <div className="gallery-card-grid">
-        {sortedMedia
-          .slice(0, Math.min(visibleCount, sortedMedia.length))
-          .map((item) => {
-            const url = getThumbnailUrl(item) ?? undefined;
-            const isSelected = selectedItems.has(item.id);
-            const isVideo = item.mimeType.startsWith("video/");
-            const event =
-              item.event || (item.eventId ? eventMap.get(item.eventId) : null);
-            const optimizeMedia = event?.visibility === "public";
-            return (
-              <div
-                key={item.id}
-                className={`group relative aspect-square overflow-hidden rounded-xl border bg-zinc-800 transition-all duration-300 hover:shadow-xl md:hover:scale-[1.02] ${
-                  item.suggestedMention
-                    ? "border-zinc-500 hover:border-zinc-400"
-                    : "border-zinc-800 hover:border-zinc-700"
-                }`}
-              >
-                <button
-                  type="button"
-                  className="h-full w-full touch-manipulation focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-zinc-950"
-                  onClick={() => {
-                    if (selectionMode) {
-                      toggleSelection(item.id);
-                    } else {
-                      setSelectedMedia(item);
-                      updateUrl(item.id);
-                      prefetchAdjacentMedia(item);
-                    }
-                  }}
-                  aria-label={`View ${item.filename}`}
-                >
-                  <LazyGalleryImage
-                    key={url ?? item.id}
-                    src={url}
-                    alt={item.filename}
-                    optimize={optimizeMedia}
-                  />
+      <VirtualGalleryGrid
+        items={sortedMedia}
+        itemKey={(item) => item.id}
+        renderItem={(item, index) => {
+          const event =
+            item.event || (item.eventId ? eventMap.get(item.eventId) : null);
+          const optimizeMedia =
+            Boolean(item.thumbnailUrl) || event?.visibility === "public";
+          return (
+            <GalleryCell
+              item={item}
+              selected={selectedItems.has(item.id)}
+              selectionMode={selectionMode}
+              optimize={optimizeMedia}
+              priority={index < 10}
+              highlight={Boolean(item.suggestedMention)}
+              draftSelected={blurMode && Boolean(blurDrafts[item.id])}
+              badges={renderBadges(item)}
+              viewTransitionName={
+                selectedMedia?.id === item.id ? undefined : `photo-${item.id}`
+              }
+              onOpen={openMedia}
+              onToggleSelect={toggleSelection}
+            />
+          );
+        }}
+      />
 
-                  {isVideo && !item.thumbnailS3Key && (
-                    <OnDemandVideoThumb
-                      mediaId={item.id}
-                      className="absolute inset-0 h-full w-full"
-                    />
-                  )}
-
-                  {isVideo && <VideoIndicator size="lg" />}
-
-                  {sortBy === "date" && (
-                    <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] items-center gap-1 rounded-lg bg-black/70 px-2 py-1 text-xs text-white backdrop-blur-sm">
-                      <HiClock className="w-3 h-3" />
-                      <span>
-                        {resolveMediaDate(
-                          item.exifData,
-                          item.uploadedAt,
-                        ).toLocaleDateString("en-US", {
-                          year: "numeric",
-                          month: "2-digit",
-                          day: "2-digit",
-                        })}
-                      </span>
-                    </div>
-                  )}
-                  {sortBy === "event" && event && (
-                    <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 backdrop-blur-sm rounded-lg text-xs text-white flex items-center gap-1">
-                      <HiCalendar className="w-3 h-3" />
-                      <span className="truncate">{event.name}</span>
-                    </div>
-                  )}
-                  {sortBy === "uploader" && (
-                    <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] items-center gap-1 rounded-lg bg-black/70 px-2 py-1 text-xs text-white backdrop-blur-sm">
-                      <HiUser className="w-3 h-3" />
-                      <span className="truncate">
-                        {item.uploadedBy?.name || "Unknown"}
-                      </span>
-                    </div>
-                  )}
-                  {sortBy === "likes" && (
-                    <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 backdrop-blur-sm rounded-lg text-xs text-white flex items-center gap-1">
-                      <HiHeart className="w-3 h-3" />
-                      <span>{item.likeCount || 0}</span>
-                    </div>
-                  )}
-                  {blurMode && blurDrafts[item.id] && (
-                    <div className="absolute right-2 top-2 rounded-full bg-red-600 px-2 py-1 text-xs font-bold text-white shadow-lg">
-                      Selected
-                    </div>
-                  )}
-                </button>
-
-                {selectionMode && (
-                  <div className="absolute top-2 left-2 z-10">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleSelection(item.id);
-                      }}
-                      className={`w-8 h-8 rounded-lg backdrop-blur-sm border-2 flex items-center justify-center transition-all hover:bg-zinc-800 ${
-                        isSelected
-                          ? "bg-red-600 border-red-600"
-                          : "bg-zinc-900/80 border-white"
-                      }`}
-                    >
-                      {isSelected && <HiCheck className="w-5 h-5 text-white" />}
-                    </button>
-                  </div>
-                )}
-                {item.suggestedMention ? (
-                  <div className="absolute inset-x-2 top-2 z-20 flex items-center justify-between gap-2">
-                    <span className="rounded-full bg-black/75 px-2 py-1 text-[11px] font-medium text-white">
-                      Is this you?
-                    </span>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-      </div>
-
-      {visibleCount < sortedMedia.length && (
-        <div
-          ref={loadMoreRef}
-          className="flex h-24 items-center justify-center text-sm text-zinc-500"
-        >
-          Loading more photos...
-        </div>
-      )}
-
-      {selectedMedia && blurMode && onBlurDraft && (
-        <PhotoDetailModal
-          media={selectedMedia}
-          fullSizeUrl={fullSizeUrl}
-          thumbnailUrl={selectedThumbnailUrl}
-          onRequestFreshUrl={() => refreshFullSizeUrl(selectedMedia)}
-          event={
-            selectedMedia.event ||
-            (selectedMedia.eventId
-              ? eventMap.get(selectedMedia.eventId)
-              : undefined)
-          }
-          currentUserId={currentUserId}
-          isGlobalAdmin={isAdmin}
-          downloading={downloading}
-          onClose={() => {
-            setSelectedMedia(null);
-            updateUrl(null);
-          }}
-          onDownload={() => handleDownload(selectedMedia)}
-          blurMode={selectedMedia.mimeType.startsWith("image/")}
-          blurDraft={blurDrafts[selectedMedia.id]}
-          onBlurSave={onBlurDraft}
-          onNext={() => {
-            const currentIndex = sortedMedia.findIndex(
-              (m) => m.id === selectedMedia.id,
-            );
-            if (currentIndex < sortedMedia.length - 1) {
-              const nextMedia = sortedMedia[currentIndex + 1];
-              setSelectedMedia(nextMedia);
-              updateUrl(nextMedia.id);
-              prefetchAdjacentMedia(nextMedia);
-            }
-          }}
-          onPrevious={() => {
-            const currentIndex = sortedMedia.findIndex(
-              (m) => m.id === selectedMedia.id,
-            );
-            if (currentIndex > 0) {
-              const prevMedia = sortedMedia[currentIndex - 1];
-              setSelectedMedia(prevMedia);
-              updateUrl(prevMedia.id);
-              prefetchAdjacentMedia(prevMedia);
-            }
-          }}
-          hasNext={
-            sortedMedia.findIndex((m) => m.id === selectedMedia.id) <
-            sortedMedia.length - 1
-          }
-          hasPrevious={
-            sortedMedia.findIndex((m) => m.id === selectedMedia.id) > 0
-          }
-        />
-      )}
-
-      {selectedMedia && !blurMode && (
-        <PhotoDetailModal
-          media={selectedMedia}
-          fullSizeUrl={fullSizeUrl}
-          thumbnailUrl={selectedThumbnailUrl}
-          onRequestFreshUrl={() => refreshFullSizeUrl(selectedMedia)}
-          event={
-            selectedMedia.event ||
-            (selectedMedia.eventId
-              ? eventMap.get(selectedMedia.eventId)
-              : undefined)
-          }
-          currentUserId={currentUserId}
-          isGlobalAdmin={isAdmin}
-          downloading={downloading}
-          onClose={() => {
-            setSelectedMedia(null);
-            updateUrl(null);
-          }}
-          onMediaUpdate={(updatedMedia) => {
-            setLocalMedia((prev) =>
-              prev.map((item) =>
-                item.id === updatedMedia.id ? updatedMedia : item,
-              ),
-            );
-            if (selectedMedia?.id === updatedMedia.id) {
-              setSelectedMedia(updatedMedia);
-            }
-          }}
-          onSuggestionResolved={(status) => {
-            if (status === "rejected") {
-              setLocalMedia((current) =>
-                current.filter((item) => item.id !== selectedMedia.id),
-              );
-              setSelectedMedia(null);
-              updateUrl(null);
-              return;
-            }
-            const updated = {
-              ...selectedMedia,
-              suggestedMention: false,
-              suggestionId: undefined,
-            };
-            setLocalMedia((current) =>
-              current.map((item) => (item.id === updated.id ? updated : item)),
-            );
-            setSelectedMedia(updated);
-          }}
-          onDownload={() => handleDownload(selectedMedia)}
-          onDelete={
-            selectedMedia.canDelete ||
-            currentUserId === selectedMedia.uploadedBy.id ||
-            isAdmin
-              ? () => {
-                  setMediaToDelete(selectedMedia.id);
-                  setShowDeleteModal(true);
-                }
-              : undefined
-          }
-          onNext={() => {
-            const currentIndex = sortedMedia.findIndex(
-              (m) => m.id === selectedMedia.id,
-            );
-            if (currentIndex < sortedMedia.length - 1) {
-              const nextMedia = sortedMedia[currentIndex + 1];
-              setSelectedMedia(nextMedia);
-              updateUrl(nextMedia.id);
-              prefetchAdjacentMedia(nextMedia);
-            }
-          }}
-          onPrevious={() => {
-            const currentIndex = sortedMedia.findIndex(
-              (m) => m.id === selectedMedia.id,
-            );
-            if (currentIndex > 0) {
-              const prevMedia = sortedMedia[currentIndex - 1];
-              setSelectedMedia(prevMedia);
-              updateUrl(prevMedia.id);
-              prefetchAdjacentMedia(prevMedia);
-            }
-          }}
-          hasNext={
-            sortedMedia.findIndex((m) => m.id === selectedMedia.id) <
-            sortedMedia.length - 1
-          }
-          hasPrevious={
-            sortedMedia.findIndex((m) => m.id === selectedMedia.id) > 0
-          }
-        />
-      )}
+      {detailModal}
 
       <ServerActionModal
         isOpen={
@@ -944,7 +777,6 @@ export default function MediaGallery({
           onApply={(matches) => {
             setFaceMediaIds(new Set(matches.map((match) => match.mediaId)));
             setIncludesMeActive(true);
-            setVisibleCount(INITIAL_VISIBLE_ITEMS);
           }}
         />
       ) : null}

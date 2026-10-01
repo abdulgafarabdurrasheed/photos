@@ -15,7 +15,7 @@ async function getHackClubLogoUrl() {
   try {
     const response = await fetch(
       "https://shrimp-shuffler.a.hackclub.dev/api/current",
-      { cache: "no-store" },
+      { next: { revalidate: 3600 } },
     );
     const url = (await response.text()).trim();
     return url || "/hackclub-icon.png";
@@ -79,6 +79,7 @@ export default async function RootLayout({
   return (
     <html lang="en" className="dark">
       <body className="min-h-screen bg-zinc-950 text-zinc-100">
+        <script type="speculationrules" src="/speculation-rules.json" />
         <Suspense fallback={null}>
           <ClientLayout initialSession={session} logoUrl={hackClubLogoUrl}>
             {children}

@@ -21,19 +21,9 @@ type ActivityFeedProps = {
   pollInterval?: number;
 };
 const MAX_FEED_ITEMS = 500;
-const MAX_FEED_IMAGE_URLS = 600;
 
 function capFeedItems(items: FeedItemType[]) {
   return items.slice(0, MAX_FEED_ITEMS);
-}
-
-function capImageUrls(urls: Map<string, string>) {
-  while (urls.size > MAX_FEED_IMAGE_URLS) {
-    const oldestKey = urls.keys().next().value;
-    if (!oldestKey) break;
-    urls.delete(oldestKey);
-  }
-  return urls;
 }
 
 export default function ActivityFeed({
@@ -45,7 +35,6 @@ export default function ActivityFeed({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
-  const [imageUrls, setImageUrls] = useState<Map<string, string>>(new Map());
   const [selectedMedia, setSelectedMedia] = useState<
     FeedItemType["media"] | null
   >(null);
@@ -62,9 +51,6 @@ export default function ActivityFeed({
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const pendingUrlIdsRef = useRef<Set<string>>(new Set());
-  const urlFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const imageUrlsRef = useRef<Map<string, string>>(new Map());
   const [isLive, setIsLive] = useState(false);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [newlyAddedIds, setNewlyAddedIds] = useState<Set<string>>(new Set());
@@ -75,41 +61,6 @@ export default function ActivityFeed({
     itemsLengthRef.current = items.length;
     itemsRef.current = items;
   }, [items]);
-  useEffect(() => {
-    imageUrlsRef.current = imageUrls;
-  }, [imageUrls]);
-  const enqueueUrlFetches = useCallback((mediaIds: string[]) => {
-    let queued = false;
-    for (const id of mediaIds) {
-      if (imageUrlsRef.current.has(id)) {
-        continue;
-      }
-      pendingUrlIdsRef.current.add(id);
-      queued = true;
-    }
-    if (!queued || urlFlushTimerRef.current) return;
-    urlFlushTimerRef.current = setTimeout(async () => {
-      urlFlushTimerRef.current = null;
-      const ids = Array.from(pendingUrlIdsRef.current);
-      pendingUrlIdsRef.current.clear();
-      if (ids.length === 0) return;
-      try {
-        const { getMediaUrls } = await import("@/app/actions/media");
-        const result = await getMediaUrls(ids);
-        if (result.success && result.urls) {
-          setImageUrls((prev) => {
-            const newUrls = new Map(prev);
-            for (const [mediaId, url] of Object.entries(result.urls!)) {
-              newUrls.set(mediaId, url);
-            }
-            return capImageUrls(newUrls);
-          });
-        }
-      } catch (err) {
-        logger.error("Failed to fetch feed media URLs:", err);
-      }
-    }, 120);
-  }, []);
   const fetchFeed = useCallback(
     async (append = false) => {
       if (isFetchingRef.current) return;
@@ -135,26 +86,6 @@ export default function ActivityFeed({
         });
         setHasMore(data.hasMore);
         setError(null);
-        const mediaIds = newItems
-          .filter((item: FeedItemType) => item.media)
-          .map((item: FeedItemType) => item.media?.id);
-        if (mediaIds.length > 0) {
-          try {
-            const { getMediaUrls } = await import("@/app/actions/media");
-            const result = await getMediaUrls(mediaIds);
-            if (result.success && result.urls) {
-              setImageUrls((prev) => {
-                const newUrls = new Map(prev);
-                for (const [mediaId, url] of Object.entries(result.urls!)) {
-                  newUrls.set(mediaId, url as string);
-                }
-                return capImageUrls(newUrls);
-              });
-            }
-          } catch (err) {
-            logger.error("Failed to fetch image URLs:", err);
-          }
-        }
       } catch (err) {
         logger.error("Feed error:", err);
         setError(err instanceof Error ? err.message : "Failed to load feed");
@@ -213,13 +144,11 @@ export default function ActivityFeed({
             data.items.length > 0
           ) {
             const incoming = data.items as FeedItemType[];
-            const urlIds: string[] = [];
             setItems((prev) => {
               const existingIds = new Set(prev.map((item) => item.id));
               const fresh = incoming.filter((item) => {
                 if (!item.id || existingIds.has(item.id)) return false;
                 existingIds.add(item.id);
-                if (item.media?.id) urlIds.push(item.media.id);
                 return true;
               });
               for (const id of fresh.map((i) => i.id)) {
@@ -235,7 +164,6 @@ export default function ActivityFeed({
               if (fresh.length === 0) return prev;
               return capFeedItems([...fresh, ...prev]);
             });
-            if (urlIds.length > 0) enqueueUrlFetches(urlIds);
           } else if (
             (data.type === "new_photo" ||
               data.type === "new_comment" ||
@@ -259,18 +187,10 @@ export default function ActivityFeed({
               }, 5000);
               return capFeedItems([data.item, ...prev]);
             });
-            if (data.item.media) {
-              enqueueUrlFetches([data.item.media.id]);
-            }
           } else if (data.type === "photo_deleted" && data.mediaId) {
             setItems((prev) =>
               prev.filter((item) => item.media?.id !== data.mediaId),
             );
-            setImageUrls((prev) => {
-              const newUrls = new Map(prev);
-              newUrls.delete(data.mediaId);
-              return newUrls;
-            });
           }
         } catch (err) {
           logger.error("WebSocket message parse error:", err);
@@ -310,12 +230,13 @@ export default function ActivityFeed({
       }
       setIsLive(false);
     };
-  }, [type, enqueueUrlFetches]);
+  }, [type]);
   useEffect(() => {
     if (type === "global" || socketRef.current) {
       return;
     }
     const pollForNew = async () => {
+      if (document.hidden) return;
       try {
         const result = await fetchData(10, 0);
         if (!result.success) return;
@@ -329,12 +250,6 @@ export default function ActivityFeed({
           );
           if (uniqueNewItems.length > 0) {
             setItems((prev) => capFeedItems([...uniqueNewItems, ...prev]));
-            const mediaIds = uniqueNewItems
-              .filter((item: FeedItemType) => item.media)
-              .map((item: FeedItemType) => item.media?.id);
-            if (mediaIds.length > 0) {
-              enqueueUrlFetches(mediaIds as string[]);
-            }
           }
         }
       } catch (err) {
@@ -350,7 +265,7 @@ export default function ActivityFeed({
         clearInterval(pollIntervalRef.current);
       }
     };
-  }, [fetchData, pollInterval, type, enqueueUrlFetches]);
+  }, [fetchData, pollInterval, type]);
   useEffect(() => {
     if (!loadMoreRef.current || !hasMore) return;
     observerRef.current = new IntersectionObserver(
@@ -369,23 +284,11 @@ export default function ActivityFeed({
     };
   }, [hasMore, loading, fetchFeed]);
   useEffect(() => {
-    const loadFullSize = async () => {
-      if (!selectedMedia) {
-        setFullSizeUrl(null);
-        return;
-      }
-      try {
-        const { getMediaUrls } = await import("@/app/actions/media");
-        const result = await getMediaUrls([selectedMedia.id]);
-        if (result.success && result.urls) {
-          const url = result.urls[selectedMedia.id];
-          setFullSizeUrl(url);
-        }
-      } catch (error) {
-        logger.error("Failed to load full-size image:", error);
-      }
-    };
-    loadFullSize();
+    if (!selectedMedia) {
+      setFullSizeUrl(null);
+      return;
+    }
+    setFullSizeUrl(`/media/${selectedMedia.id}`);
   }, [selectedMedia]);
   useEffect(() => {
     const handleScroll = () => {
@@ -430,17 +333,13 @@ export default function ActivityFeed({
 
       <div className="feed-card-grid w-full pb-20">
         {items.map((item, index) => {
-          const imageUrl = item.media
-            ? item.media.thumbnailS3Key
-              ? imageUrls.get(item.media.thumbnailS3Key)
-              : imageUrls.get(item.media.id)
-            : null;
+          const imageUrl = item.media?.thumbnailUrl ?? null;
           const isNew = newlyAddedIds.has(item.id);
           return (
             <FeedItem
               key={item.id}
               item={item}
-              imageUrl={imageUrl || null}
+              imageUrl={imageUrl}
               isNew={isNew}
               index={index}
               onSelect={(media) => setSelectedMedia(media)}
@@ -491,6 +390,8 @@ export default function ActivityFeed({
             canDelete: selectedMedia.canDelete,
           }}
           fullSizeUrl={fullSizeUrl}
+          displayUrl={selectedMedia.displayUrl ?? null}
+          displayAvifUrl={selectedMedia.displayAvifUrl ?? null}
           event={items.find((i) => i.media?.id === selectedMedia.id)?.event}
           currentUserId={currentUserId || undefined}
           isGlobalAdmin={isGlobalAdmin}

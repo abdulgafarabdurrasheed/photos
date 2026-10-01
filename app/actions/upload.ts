@@ -6,6 +6,7 @@ import {
   HeadObjectCommand,
   NotFound,
 } from "@aws-sdk/client-s3";
+import { after } from "next/server";
 import { auditLog } from "@/lib/audit";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
@@ -589,29 +590,37 @@ export async function finalizeUpload(
         takenAt: takenAt,
       })
       .returning();
-    await auditLog(user.id, "upload", "media", insertedMedia.id, {
-      eventId,
-      filename: data.filename,
-    });
-    await queueMediaForFaceIndexing(insertedMedia.id).catch((error) => {
-      logger.error("Failed to queue face indexing:", error);
-    });
-    try {
-      const { broadcastNewPhoto } = await import("@/app/api/feed/stream/route");
-      broadcastNewPhoto(insertedMedia.id).catch((error) => {
+    after(async () => {
+      await auditLog(user.id, "upload", "media", insertedMedia.id, {
+        eventId,
+        filename: data.filename,
+      }).catch((error) => {
+        logger.error("Failed to write upload audit log:", error);
+      });
+      await queueMediaForFaceIndexing(insertedMedia.id).catch((error) => {
+        logger.error("Failed to queue face indexing:", error);
+      });
+      try {
+        const { broadcastNewPhoto } = await import(
+          "@/app/api/feed/stream/route"
+        );
+        await broadcastNewPhoto(insertedMedia.id).catch((error) => {
+          logger.error("Failed to broadcast new photo:", error);
+        });
+      } catch (error) {
         logger.error("Failed to broadcast new photo:", error);
-      });
-    } catch (error) {
-      logger.error("Failed to broadcast new photo:", error);
-    }
-    try {
-      const { notifyUploadForFeed } = await import("@/lib/slack-notifications");
-      notifyUploadForFeed(insertedMedia.id).catch((error) => {
-        logger.error("Failed to enqueue Slack feed notification:", error);
-      });
-    } catch (error) {
-      logger.error("Failed to load Slack feed notification:", error);
-    }
+      }
+      try {
+        const { notifyUploadForFeed } = await import(
+          "@/lib/slack-notifications"
+        );
+        await notifyUploadForFeed(insertedMedia.id).catch((error) => {
+          logger.error("Failed to enqueue Slack feed notification:", error);
+        });
+      } catch (error) {
+        logger.error("Failed to load Slack feed notification:", error);
+      }
+    });
     if (!skipRevalidation) {
       try {
         const { revalidatePath } = await import("next/cache");

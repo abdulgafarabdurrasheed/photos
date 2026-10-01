@@ -4,7 +4,7 @@ import {
   getMultipartPresignedUrls,
   initiateMultipartUpload,
 } from "@/app/actions/upload";
-import { logger } from "@/lib/logger";
+import { logger } from "@/lib/client-logger";
 import type { ExifData } from "./exif";
 export interface UploadFile {
   id: string;

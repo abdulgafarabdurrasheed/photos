@@ -31,7 +31,7 @@ import {
   HiUserGroup,
   HiXMark,
 } from "react-icons/hi2";
-import { updateMediaCaption } from "@/app/actions/media";
+import { getMediaExifData, updateMediaCaption } from "@/app/actions/media";
 import {
   addMention,
   confirmFaceSuggestion,
@@ -69,8 +69,9 @@ import {
   type BlurRect,
   buildBlurPreview,
 } from "./BlurEditorModal";
-import ChangeOwnerModal from "./ChangeOwnerModal";
-import ReportModal from "./ReportModal";
+
+const ChangeOwnerModal = dynamic(() => import("./ChangeOwnerModal"));
+const ReportModal = dynamic(() => import("./ReportModal"));
 
 const MiniMap = dynamic(() => import("@/components/map/MiniMap"), {
   ssr: false,
@@ -119,8 +120,8 @@ interface MediaItem {
   caption?: string | null;
   likeCount?: number;
   canDelete?: boolean;
-  s3Url: string;
-  thumbnailS3Key: string | null;
+  s3Url?: string;
+  thumbnailS3Key?: string | null;
   eventId?: string;
   event?: {
     id: string;
@@ -190,6 +191,8 @@ interface MentionedUser {
 interface Props {
   media: MediaItem;
   fullSizeUrl: string | null;
+  displayUrl?: string | null;
+  displayAvifUrl?: string | null;
   thumbnailUrl?: string | null;
   event?: Event;
   currentUserId?: string;
@@ -212,6 +215,8 @@ interface Props {
 export default function PhotoDetailModal({
   media,
   fullSizeUrl,
+  displayUrl = null,
+  displayAvifUrl = null,
   thumbnailUrl = null,
   event,
   currentUserId,
@@ -258,7 +263,8 @@ export default function PhotoDetailModal({
   });
 
   const MAX_IMAGE_AUTO_RETRIES = 2;
-  const resolvedUrl = fullSizeUrl ?? "";
+  const resolvedUrl = displayUrl ?? fullSizeUrl ?? "";
+  const resolvedAvifUrl = displayAvifUrl;
   // biome-ignore lint/correctness/useExhaustiveDependencies: Changing photos must clear unsaved blur regions even without a draft.
   useEffect(() => {
     setBlurRegions(blurDraft?.regions ?? []);
@@ -277,6 +283,17 @@ export default function PhotoDetailModal({
       return resolvedUrl;
     }
   }, [resolvedUrl, retryCount]);
+  const effectiveAvifUrl = useMemo(() => {
+    if (!resolvedAvifUrl) return null;
+    if (retryCount === 0) return resolvedAvifUrl;
+    try {
+      const url = new URL(resolvedAvifUrl, window.location.origin);
+      url.searchParams.set("t", Date.now().toString());
+      return url.toString();
+    } catch (_e) {
+      return resolvedAvifUrl;
+    }
+  }, [resolvedAvifUrl, retryCount]);
   const imageIdentity = `${media.id}:${resolvedUrl}`;
   useEffect(() => {
     if (!imageIdentity) return;
@@ -342,7 +359,24 @@ export default function PhotoDetailModal({
   const [showChangeOwnerModal, setShowChangeOwnerModal] = useState(false);
   const [commentsLoaded, setCommentsLoaded] = useState(false);
   const [showLocationMap, setShowLocationMap] = useState(false);
-  const exif = (media.exifData || {}) as unknown as ExifData;
+  const [exifData, setExifData] = useState<Record<string, unknown> | null>(
+    media.exifData,
+  );
+  useEffect(() => {
+    setExifData(media.exifData);
+    if (media.exifData && Object.keys(media.exifData).length > 1) return;
+    let cancelled = false;
+    void getMediaExifData(media.id).then((result) => {
+      if (cancelled) return;
+      if (result.success && result.exifData) {
+        setExifData(result.exifData);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [media.id, media.exifData]);
+  const exif = (exifData || {}) as unknown as ExifData;
   const hasCamera = exif.Make || exif.make || exif.Model || exif.model;
   const hasLens = exif.LensModel || exif.lensModel;
   const hasCameraSettings =
@@ -1352,7 +1386,10 @@ export default function PhotoDetailModal({
                     src={thumbnailUrl}
                     alt={media.filename}
                     fill
-                    unoptimized={event?.visibility !== "public"}
+                    unoptimized={
+                      !thumbnailUrl.includes("sig=") &&
+                      event?.visibility !== "public"
+                    }
                     sizes="(max-width: 1024px) 100vw, 70vw"
                     priority
                     className="select-none object-contain opacity-100 blur-[1px] scale-[1.005] transition-opacity duration-300"
@@ -1360,40 +1397,42 @@ export default function PhotoDetailModal({
                   />
                 )}
                 {effectiveUrl && (
-                  <Image
-                    ref={blurImageRef}
-                    src={effectiveUrl}
-                    alt={media.filename}
-                    fill
-                    unoptimized={event?.visibility !== "public"}
-                    sizes="(max-width: 1024px) 100vw, 70vw"
-                    priority
-                    draggable={false}
-                    className={`select-none object-contain transition-opacity duration-500 ease-out ${
-                      imageLoaded ? "opacity-100" : "opacity-0"
-                    }`}
-                    onLoad={() => {
-                      setImageLoaded(true);
-                      setImageError(false);
-                      requestAnimationFrame(measureBlurImage);
-                    }}
-                    onError={(e) => {
-                      setImageLoaded(false);
-                      if (retryCount < MAX_IMAGE_AUTO_RETRIES) {
-                        onRequestFreshUrl?.();
+                  <picture>
+                    {effectiveAvifUrl && (
+                      <source srcSet={effectiveAvifUrl} type="image/avif" />
+                    )}
+                    <img
+                      ref={blurImageRef}
+                      src={effectiveUrl}
+                      alt={media.filename}
+                      draggable={false}
+                      style={{ viewTransitionName: `photo-${media.id}` }}
+                      className={`absolute inset-0 h-full w-full select-none object-contain transition-opacity duration-500 ease-out ${
+                        imageLoaded ? "opacity-100" : "opacity-0"
+                      }`}
+                      onLoad={() => {
+                        setImageLoaded(true);
+                        setImageError(false);
+                        requestAnimationFrame(measureBlurImage);
+                      }}
+                      onError={() => {
+                        setImageLoaded(false);
+                        if (retryCount < MAX_IMAGE_AUTO_RETRIES) {
+                          onRequestFreshUrl?.();
 
-                        window.setTimeout(
-                          () => {
-                            setRetryCount((c) => c + 1);
-                          },
-                          400 * (retryCount + 1),
-                        );
-                        return;
-                      }
+                          window.setTimeout(
+                            () => {
+                              setRetryCount((c) => c + 1);
+                            },
+                            400 * (retryCount + 1),
+                          );
+                          return;
+                        }
 
-                      setImageError(true);
-                    }}
-                  />
+                        setImageError(true);
+                      }}
+                    />
+                  </picture>
                 )}
                 {!imageLoaded && !imageError && (
                   <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 bg-black/10 pointer-events-none">

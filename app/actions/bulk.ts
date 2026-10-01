@@ -15,7 +15,7 @@ import { rebuildEventFaceIndex } from "@/lib/face-indexing";
 import { logger } from "@/lib/logger";
 import { getMediaProxyUrl } from "@/lib/media/s3";
 import { deleteBatchMedia } from "@/lib/media/thumbnail";
-import { can, getUserContext } from "@/lib/policy";
+import { can, getUserContext, invalidateUserContext } from "@/lib/policy";
 import { parseSlackIds } from "@/lib/slack-id";
 export async function getBulkMediaUrls(s3Keys?: string[], mediaIds?: string[]) {
   try {
@@ -254,6 +254,7 @@ export async function bulkCreateEvents(
               userId: userId,
             })),
           );
+          for (const adminId of adminIds) invalidateUserContext(adminId);
         }
         if (user.isGlobalAdmin && pendingAdminSlackIds.length > 0) {
           await db.insert(pendingEventAdmins).values(

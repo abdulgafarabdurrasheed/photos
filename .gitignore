@@ -41,3 +41,6 @@ roc-*/
 
 app/api/v1/mobile
 mobile/*
+
+# command-code session state
+.commandcode/

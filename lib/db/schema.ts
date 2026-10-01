@@ -377,6 +377,11 @@ export const mediaLikes = pgTable(
   },
   (t) => ({
     userMediaIdx: index("media_likes_user_media_idx").on(t.userId, t.mediaId),
+    mediaIdIdx: index("media_likes_media_id_idx").on(t.mediaId),
+    userCreatedIdx: index("media_likes_user_created_idx").on(
+      t.userId,
+      t.createdAt.desc(),
+    ),
   }),
 );
 export const mediaComments = pgTable(
@@ -496,6 +501,10 @@ export const mediaMentions = pgTable(
   },
   (t) => ({
     pk: primaryKey({ columns: [t.mediaId, t.userId] }),
+    userCreatedIdx: index("media_mentions_user_created_idx").on(
+      t.userId,
+      t.createdAt.desc(),
+    ),
   }),
 );
 export const faceSystemSettings = pgTable("face_system_settings", {

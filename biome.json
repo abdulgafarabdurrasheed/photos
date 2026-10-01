@@ -13,7 +13,9 @@
       "!**/node_modules",
       "!**/.next",
       "!roc-*",
-      "!mobile"
+      "!mobile",
+      "!drizzle/meta",
+      "!public/maplibre"
     ]
   },
   "formatter": {

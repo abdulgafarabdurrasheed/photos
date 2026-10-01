@@ -21,6 +21,7 @@ export default function FeedItem({
   onSelect,
 }: FeedItemProps) {
   const isVideo = item.media?.mimeType.startsWith("video/");
+  const resolvedImageUrl = item.media?.thumbnailUrl ?? imageUrl;
   const formatTimeAgo = (date: Date) => {
     const seconds = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
     if (seconds < 60) return "just now";
@@ -108,17 +109,20 @@ export default function FeedItem({
             onClick={() => onSelect(item.media!)}
             className="block w-full aspect-square relative group/media"
           >
-            {!imageUrl ? (
+            {!resolvedImageUrl ? (
               <div className="w-full h-full flex items-center justify-center bg-zinc-900">
                 <HiPhoto className="w-8 h-8 text-zinc-700" />
               </div>
             ) : (
               <>
                 <Image
-                  src={imageUrl}
+                  src={resolvedImageUrl}
                   alt={item.media.filename}
                   fill
-                  unoptimized={item.event?.visibility !== "public"}
+                  unoptimized={
+                    !item.media.thumbnailUrl &&
+                    item.event?.visibility !== "public"
+                  }
                   sizes="(max-width: 767px) calc(100vw - 2rem), 320px"
                   priority={index < 3}
                   className="object-cover transition-transform duration-700 group-hover/media:scale-105"

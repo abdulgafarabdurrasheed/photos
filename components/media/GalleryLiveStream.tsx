@@ -22,8 +22,10 @@ function toMediaItem(item: ActivityMedia): MediaItem | null {
   const up = m.uploadedBy || item.user || {};
   return {
     id: m.id,
-    s3Url: m.s3Url,
     thumbnailS3Key: m.thumbnailS3Key ?? null,
+    thumbnailUrl: m.thumbnailUrl ?? null,
+    displayUrl: m.displayUrl ?? null,
+    displayAvifUrl: m.displayAvifUrl ?? null,
     filename: m.filename || "",
     mimeType: m.mimeType || "image/jpeg",
     width: m.width ?? null,

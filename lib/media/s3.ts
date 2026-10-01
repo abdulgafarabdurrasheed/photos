@@ -272,7 +272,39 @@ export async function abortMultipartUpload(
   });
   await s3Client.send(command);
 }
-export async function getStorageStats(): Promise<{
+const STORAGE_STATS_TTL_MS = 5 * 60_000;
+
+const storageStatsCache = new Map<
+  string,
+  { expiry: number; promise: Promise<unknown> }
+>();
+
+function cachedStorageStats<T>(
+  key: string,
+  compute: () => Promise<T>,
+): Promise<T> {
+  const now = Date.now();
+  const hit = storageStatsCache.get(key);
+  if (hit && hit.expiry > now) return hit.promise as Promise<T>;
+  const promise = compute();
+  storageStatsCache.set(key, { expiry: now + STORAGE_STATS_TTL_MS, promise });
+  promise.catch(() => {
+    if (storageStatsCache.get(key)?.promise === promise) {
+      storageStatsCache.delete(key);
+    }
+  });
+  return promise;
+}
+
+export async function getStorageStats() {
+  return await cachedStorageStats("totals", computeStorageStats);
+}
+
+export async function getDetailedStorageStats() {
+  return await cachedStorageStats("detailed", computeDetailedStorageStats);
+}
+
+async function computeStorageStats(): Promise<{
   totalSize: number;
   totalFiles: number;
 }> {
@@ -295,7 +327,7 @@ export async function getStorageStats(): Promise<{
   } while (continuationToken);
   return { totalSize, totalFiles };
 }
-export async function getDetailedStorageStats(): Promise<{
+async function computeDetailedStorageStats(): Promise<{
   totalSize: number;
   totalFiles: number;
   breakdown: {

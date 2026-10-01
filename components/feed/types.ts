@@ -18,11 +18,14 @@ export type FeedItemType = {
   media?: {
     id: string;
     filename: string;
-    s3Url: string;
+    s3Url?: string;
     mimeType: string;
     width: number | null;
     height: number | null;
     thumbnailS3Key?: string | null;
+    thumbnailUrl?: string | null;
+    displayUrl?: string | null;
+    displayAvifUrl?: string | null;
     exifData: Record<string, unknown> | null;
     uploadedAt: Date;
     uploadedBy: {

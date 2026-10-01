@@ -7,7 +7,7 @@ import { db } from "@/lib/db";
 import { series } from "@/lib/db/schema";
 import { logger } from "@/lib/logger";
 import { deleteMediaAndThumbnail } from "@/lib/media/thumbnail";
-import { can, getUserContext } from "@/lib/policy";
+import { can, getUserContext, invalidateUserContext } from "@/lib/policy";
 
 function isUUID(str: string): boolean {
   const uuidRegex =
@@ -167,6 +167,7 @@ export async function createSeries(data: SeriesInput) {
       seriesId: newSeries.id,
       userId: user.id,
     });
+    invalidateUserContext(user.id);
     await auditLog(user.id, "create", "series", newSeries.id, {
       name,
       slug,

@@ -8,8 +8,41 @@ import sharp, {
 import { ALLOWED_IMAGE_TYPES } from "@/lib/media/validation";
 import { deleteFromS3, deleteFromS3Batch, uploadToS3 } from "./s3";
 
+export const THUMBNAIL_SIZE = 400;
+export const THUMBNAIL_SM_SIZE = 320;
+export const DISPLAY_LG_SIZE = 1600;
+
 export function getThumbnailS3Key(mediaId: string) {
   return `media/${mediaId}/thumbnail.jpg`;
+}
+
+export type ThumbnailDerivativeKind = "thumb-sm" | "display";
+export type ThumbnailDerivativeFormat = "jpg" | "avif";
+
+const DERIVATIVE_SOURCE_TAGS = ["none", "pending", "approved", "rejected"];
+
+export function getDerivativeSourceTag(blurStatus?: string | null) {
+  const tag = (blurStatus ?? "none").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return tag || "none";
+}
+
+export function getThumbnailDerivativeS3Key(
+  mediaId: string,
+  kind: ThumbnailDerivativeKind,
+  sourceTag: string,
+  format: ThumbnailDerivativeFormat = "jpg",
+) {
+  return `media/${mediaId}/${kind}-${sourceTag}.${format}`;
+}
+
+export function getThumbnailDerivativeS3Keys(mediaId: string) {
+  const keys: string[] = [];
+  for (const tag of DERIVATIVE_SOURCE_TAGS) {
+    keys.push(getThumbnailDerivativeS3Key(mediaId, "thumb-sm", tag));
+    keys.push(getThumbnailDerivativeS3Key(mediaId, "display", tag));
+    keys.push(getThumbnailDerivativeS3Key(mediaId, "display", tag, "avif"));
+  }
+  return keys;
 }
 
 function isUnsupportedImageMimeType(mimeType?: string | null) {
@@ -31,44 +64,48 @@ export async function processImageUpload(
   );
 }
 
-async function buildRobustImageThumbnail(buffer: Buffer) {
+async function buildRobustImageThumbnail(
+  buffer: Buffer,
+  size = THUMBNAIL_SIZE,
+  quality = 76,
+) {
   const attempts = [
     () =>
       createSharp(buffer, { failOn: "none" })
         .rotate()
         .flatten({ background: "#111111" })
-        .resize(400, 400, {
+        .resize(size, size, {
           fit: "cover",
           position: "attention",
           withoutEnlargement: false,
           kernel: sharp.kernel.lanczos3,
         })
         .normalise()
-        .jpeg({ quality: 76, mozjpeg: true, progressive: true })
+        .jpeg({ quality, mozjpeg: true, progressive: true })
         .toBuffer(),
     () =>
       createSharp(buffer, { failOn: "none" })
         .rotate()
         .flatten({ background: "#111111" })
-        .resize(400, 400, {
+        .resize(size, size, {
           fit: "cover",
           position: "center",
           withoutEnlargement: false,
           kernel: sharp.kernel.lanczos3,
         })
         .normalise()
-        .jpeg({ quality: 76, mozjpeg: true, progressive: true })
+        .jpeg({ quality, mozjpeg: true, progressive: true })
         .toBuffer(),
     () =>
       createSharp(buffer, { failOn: "none" })
         .flatten({ background: "#111111" })
-        .resize(400, 400, {
+        .resize(size, size, {
           fit: "cover",
           position: "center",
           withoutEnlargement: false,
           kernel: sharp.kernel.lanczos3,
         })
-        .jpeg({ quality: 76, mozjpeg: true, progressive: true })
+        .jpeg({ quality, mozjpeg: true, progressive: true })
         .toBuffer(),
   ];
   let lastError: unknown;
@@ -82,6 +119,110 @@ async function buildRobustImageThumbnail(buffer: Buffer) {
   throw lastError instanceof Error
     ? lastError
     : new Error("Could not generate image thumbnail");
+}
+
+export async function buildDisplayImage(buffer: Buffer): Promise<Buffer> {
+  return await createSharp(buffer, { failOn: "none" })
+    .rotate()
+    .resize(DISPLAY_LG_SIZE, DISPLAY_LG_SIZE, {
+      fit: "inside",
+      withoutEnlargement: true,
+      kernel: sharp.kernel.lanczos3,
+    })
+    .jpeg({ quality: 80, mozjpeg: true, progressive: true })
+    .toBuffer();
+}
+
+export async function buildDisplayAvif(buffer: Buffer): Promise<Buffer> {
+  return await createSharp(buffer, { failOn: "none" })
+    .rotate()
+    .resize(DISPLAY_LG_SIZE, DISPLAY_LG_SIZE, {
+      fit: "inside",
+      withoutEnlargement: true,
+      kernel: sharp.kernel.lanczos3,
+    })
+    .avif({ quality: 60, effort: 4 })
+    .toBuffer();
+}
+
+async function buildThumbnailDerivativeInternal(options: {
+  mediaId: string;
+  kind: ThumbnailDerivativeKind;
+  sourceTag: string;
+  sourceBuffer: Buffer;
+  tags?: Record<string, string>;
+  signal?: AbortSignal;
+}): Promise<string | null> {
+  const { mediaId, kind, sourceTag, sourceBuffer, tags, signal } = options;
+  const outputs: { key: string; buffer: Buffer; contentType: string }[] = [];
+  if (kind === "display") {
+    outputs.push({
+      key: getThumbnailDerivativeS3Key(mediaId, "display", sourceTag),
+      buffer: await buildDisplayImage(sourceBuffer),
+      contentType: "image/jpeg",
+    });
+    if (signal?.aborted) return null;
+    outputs.push({
+      key: getThumbnailDerivativeS3Key(mediaId, "display", sourceTag, "avif"),
+      buffer: await buildDisplayAvif(sourceBuffer),
+      contentType: "image/avif",
+    });
+  } else {
+    outputs.push({
+      key: getThumbnailDerivativeS3Key(mediaId, "thumb-sm", sourceTag),
+      buffer: await buildRobustImageThumbnail(
+        sourceBuffer,
+        THUMBNAIL_SM_SIZE,
+        72,
+      ),
+      contentType: "image/jpeg",
+    });
+  }
+  if (signal?.aborted) return null;
+  for (const output of outputs) {
+    await uploadToS3(
+      output.buffer,
+      output.key,
+      output.contentType,
+      signal,
+      tags,
+    );
+  }
+  return outputs[0].key;
+}
+
+export async function generateThumbnailDerivative(options: {
+  mediaId: string;
+  kind: ThumbnailDerivativeKind;
+  sourceTag: string;
+  sourceBuffer: Buffer;
+  tags?: Record<string, string>;
+  signal?: AbortSignal;
+}): Promise<string | null> {
+  const { mediaId, kind, sourceTag, signal } = options;
+  const derivativeKey = getThumbnailDerivativeS3Key(mediaId, kind, sourceTag);
+  const existing = pendingThumbnailGenerations.get(derivativeKey);
+  if (existing) return await existing;
+  const generation = (async () => {
+    try {
+      return await withImageProcessingSlot(
+        () => buildThumbnailDerivativeInternal(options),
+        signal,
+      );
+    } catch (error) {
+      logger.warn({ mediaId, derivativeKey }, "Derivative generation failed");
+      logger.error(error);
+      return null;
+    }
+  })();
+  pendingThumbnailGenerations.set(derivativeKey, generation);
+  try {
+    return await generation;
+  } finally {
+    if (pendingThumbnailGenerations.get(derivativeKey) === generation) {
+      pendingThumbnailGenerations.delete(derivativeKey);
+    }
+  }
 }
 
 async function uploadThumbnail(
@@ -137,6 +278,13 @@ async function processImageUploadInternal(
   const thumbnailS3Key = await uploadThumbnail(thumbnailBuffer, mediaId, {
     uploadedBy,
     eventId,
+  });
+  await buildThumbnailDerivativeInternal({
+    mediaId,
+    kind: "thumb-sm",
+    sourceTag: "none",
+    sourceBuffer: thumbnailBuffer,
+    tags: { uploadedBy, eventId },
   });
   return { thumbnailS3Key, width, height, exifBuffer };
 }
@@ -221,8 +369,15 @@ export async function deleteMediaAndThumbnail(
   relatedS3Keys: (string | null | undefined)[] = [],
 ): Promise<void> {
   await deleteFromS3(s3Key);
+  const keyParts = s3Key.split("/");
+  const mediaId =
+    keyParts.length >= 3 && keyParts[0] === "media" ? keyParts[1] : null;
+  const derivativeKeys =
+    mediaId && /^[0-9a-f-]{36}$/i.test(mediaId)
+      ? getThumbnailDerivativeS3Keys(mediaId)
+      : [];
   for (const key of new Set(
-    [thumbnailS3Key, ...relatedS3Keys].filter(
+    [thumbnailS3Key, ...relatedS3Keys, ...derivativeKeys].filter(
       (value): value is string => Boolean(value) && value !== s3Key,
     ),
   )) {
@@ -272,6 +427,7 @@ export async function deleteBatchMedia(
       item.originalThumbnailS3Key,
       item.blurredS3Key,
       item.blurredThumbnailS3Key,
+      ...getThumbnailDerivativeS3Keys(item.id),
     ]) {
       if (key && key !== item.s3Key) keysToDelete.push(key);
     }

@@ -15,6 +15,8 @@ import {
   users,
 } from "@/lib/db/schema";
 import { logger } from "@/lib/logger";
+import { slimExifData } from "@/lib/media/client-media";
+import { getMediaDisplayUrl, getMediaThumbnailUrl } from "@/lib/media/urls";
 import { can, getUserContext } from "@/lib/policy";
 import { getRedisClient } from "@/lib/rate-limit";
 import { toPublicUser } from "@/lib/user-display";
@@ -98,7 +100,6 @@ async function fetchPhotoItems(ids: string[]): Promise<Record<string, any>[]> {
     .select({
       id: media.id,
       filename: media.filename,
-      s3Url: media.s3Url,
       mimeType: media.mimeType,
       width: media.width,
       height: media.height,
@@ -139,12 +140,18 @@ async function fetchPhotoItems(ids: string[]): Promise<Record<string, any>[]> {
     media: {
       id: item.id,
       filename: item.filename,
-      s3Url: item.s3Url,
       mimeType: item.mimeType,
       width: item.width,
       height: item.height,
       thumbnailS3Key: item.thumbnailS3Key,
-      exifData: item.exifData,
+      thumbnailUrl: getMediaThumbnailUrl(item.id, "sm"),
+      displayUrl: item.mimeType.startsWith("image/")
+        ? getMediaDisplayUrl(item.id)
+        : null,
+      displayAvifUrl: item.mimeType.startsWith("image/")
+        ? getMediaDisplayUrl(item.id, "avif")
+        : null,
+      exifData: slimExifData(item.exifData),
       uploadedAt: item.uploadedAt,
       uploadedBy: item.uploadedBy ? toPublicUser(item.uploadedBy) : null,
       likeCount: item.likeCount,
@@ -378,7 +385,6 @@ export async function broadcastNewComment(commentId: string) {
         media: {
           id: media.id,
           filename: media.filename,
-          s3Url: media.s3Url,
           mimeType: media.mimeType,
           thumbnailS3Key: media.thumbnailS3Key,
         },
@@ -416,7 +422,19 @@ export async function broadcastNewComment(commentId: string) {
             content: item.content,
             mediaId: item.media.id,
           },
-          media: item.media,
+          media: {
+            id: item.media.id,
+            filename: item.media.filename,
+            mimeType: item.media.mimeType,
+            thumbnailS3Key: item.media.thumbnailS3Key,
+            thumbnailUrl: getMediaThumbnailUrl(item.media.id, "sm"),
+            displayUrl: item.media.mimeType.startsWith("image/")
+              ? getMediaDisplayUrl(item.media.id)
+              : null,
+            displayAvifUrl: item.media.mimeType.startsWith("image/")
+              ? getMediaDisplayUrl(item.media.id, "avif")
+              : null,
+          },
         },
       };
       await notifyFeedUpdate(activityData);
@@ -434,7 +452,6 @@ export async function broadcastNewLike(mediaId: string, userId: string) {
         media: {
           id: media.id,
           filename: media.filename,
-          s3Url: media.s3Url,
           mimeType: media.mimeType,
           thumbnailS3Key: media.thumbnailS3Key,
         },
@@ -469,7 +486,19 @@ export async function broadcastNewLike(mediaId: string, userId: string) {
           timestamp: item.createdAt,
           event: item.event,
           user: toPublicUser(item.user),
-          media: item.media,
+          media: {
+            id: item.media.id,
+            filename: item.media.filename,
+            mimeType: item.media.mimeType,
+            thumbnailS3Key: item.media.thumbnailS3Key,
+            thumbnailUrl: getMediaThumbnailUrl(item.media.id, "sm"),
+            displayUrl: item.media.mimeType.startsWith("image/")
+              ? getMediaDisplayUrl(item.media.id)
+              : null,
+            displayAvifUrl: item.media.mimeType.startsWith("image/")
+              ? getMediaDisplayUrl(item.media.id, "avif")
+              : null,
+          },
         },
       };
       await notifyFeedUpdate(activityData);

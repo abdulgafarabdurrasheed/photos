@@ -22,7 +22,9 @@ import UploadButton from "@/components/media/UploadButton";
 import { getSession } from "@/lib/auth";
 import { APP_URL } from "@/lib/constants";
 import { db } from "@/lib/db";
+import { leanMediaColumns } from "@/lib/db/lean-columns";
 import { eventParticipants, events, media, mediaLikes } from "@/lib/db/schema";
+import { toClientMedia } from "@/lib/media/client-media";
 import { getAssetProxyUrl } from "@/lib/media/s3";
 import { createOgMetadata } from "@/lib/metadata";
 import { can, getUserContext } from "@/lib/policy";
@@ -105,6 +107,7 @@ export default async function EventPage({
     with: {
       series: true,
       media: {
+        columns: leanMediaColumns,
         with: {
           uploadedBy: {
             columns: {
@@ -406,21 +409,8 @@ export default async function EventPage({
             </div>
             <BlurMeGallery
               media={mediaWithPermissions.map((m) => ({
-                id: m.id,
-                filename: m.filename,
-                mimeType: m.mimeType,
-                width: m.width,
-                height: m.height,
-                exifData: m.exifData as Record<string, unknown> | null,
-                latitude: m.latitude,
-                longitude: m.longitude,
-                uploadedAt: m.uploadedAt,
-                caption: m.caption,
+                ...toClientMedia(m),
                 canDelete: (m as any).canDelete,
-                s3Url: m.s3Url,
-                s3Key: m.s3Key,
-                thumbnailS3Key: m.thumbnailS3Key,
-                uploadedBy: toPublicUser(m.uploadedBy),
                 likeCount: likeCountByMediaId.get(m.id) ?? 0,
               }))}
               events={[

@@ -10,6 +10,29 @@ import {
 
 const attempted = new Set<string>();
 
+const MAX_CONCURRENT_GENERATIONS = 2;
+let activeGenerations = 0;
+const generationQueue: (() => void)[] = [];
+
+function acquireGenerationSlot(): Promise<() => void> {
+  return new Promise((resolve) => {
+    const release = () => {
+      activeGenerations--;
+      const next = generationQueue.shift();
+      if (next) next();
+    };
+    if (activeGenerations < MAX_CONCURRENT_GENERATIONS) {
+      activeGenerations++;
+      resolve(release);
+      return;
+    }
+    generationQueue.push(() => {
+      activeGenerations++;
+      resolve(release);
+    });
+  });
+}
+
 interface OnDemandVideoThumbProps {
   mediaId: string;
   className?: string;
@@ -29,7 +52,9 @@ export default function OnDemandVideoThumb({
     attempted.add(mediaId);
     const controller = new AbortController();
     let cancelled = false;
+    let objectUrl: string | null = null;
     const run = async () => {
+      const release = await acquireGenerationSlot();
       try {
         const response = await fetch(`/media/${mediaId}/thumbnail`, {
           method: "POST",
@@ -56,17 +81,21 @@ export default function OnDemandVideoThumb({
           URL.revokeObjectURL(url);
           return;
         }
+        objectUrl = url;
         setPosterUrl(url);
         await markMediaThumbnailReady(mediaId);
       } catch (error) {
         if (controller.signal.aborted) return;
         logger.warn("On-demand video thumbnail generation failed:", error);
+      } finally {
+        release();
       }
     };
     void run();
     return () => {
       cancelled = true;
       controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [mediaId]);
 

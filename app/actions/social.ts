@@ -1,5 +1,6 @@
 "use server";
 import { and, count, desc, eq, inArray, isNull } from "drizzle-orm";
+import { after } from "next/server";
 import {
   broadcastNewComment,
   broadcastNewLike,
@@ -23,22 +24,24 @@ export async function toggleMediaLike(mediaId: string) {
     return { success: false, error: "Unauthorized" };
   }
   try {
-    const mediaItem = await db.query.media.findFirst({
-      where: eq(media.id, mediaId),
-      with: { event: true },
-    });
+    const [mediaItem, existingLike] = await Promise.all([
+      db.query.media.findFirst({
+        where: eq(media.id, mediaId),
+        with: { event: true },
+      }),
+      db.query.mediaLikes.findFirst({
+        where: and(
+          eq(mediaLikes.mediaId, mediaId),
+          eq(mediaLikes.userId, user.id),
+        ),
+      }),
+    ]);
     if (!mediaItem) {
       return { success: false, error: "Media not found" };
     }
     if (!(await can(user, "interact", "media", mediaItem))) {
       return { success: false, error: "Unauthorized" };
     }
-    const existingLike = await db.query.mediaLikes.findFirst({
-      where: and(
-        eq(mediaLikes.mediaId, mediaId),
-        eq(mediaLikes.userId, user.id),
-      ),
-    });
     if (existingLike) {
       await db
         .delete(mediaLikes)
@@ -56,13 +59,11 @@ export async function toggleMediaLike(mediaId: string) {
       eq(mediaLikes.mediaId, mediaId),
     );
     if (!existingLike) {
-      try {
-        broadcastNewLike(mediaId, user.id).catch((error) => {
+      after(async () => {
+        await broadcastNewLike(mediaId, user.id).catch((error) => {
           logger.error("Failed to broadcast new like:", error);
         });
-      } catch (error) {
-        logger.error("Failed to broadcast new like:", error);
-      }
+      });
       try {
         const { notifyMediaLike } = await import("@/lib/slack-notifications");
         notifyMediaLike(mediaId, user.id).catch((error) => {
@@ -173,9 +174,9 @@ export async function getMediaComments(mediaId: string) {
       c.id,
       ...c.replies.map((r) => r.id),
     ]);
-    const likeCounts =
+    const [likeCounts, userLikes] = await Promise.all([
       commentIds.length > 0
-        ? await db
+        ? db
             .select({
               commentId: commentLikes.commentId,
               count: count(),
@@ -183,13 +184,9 @@ export async function getMediaComments(mediaId: string) {
             .from(commentLikes)
             .where(inArray(commentLikes.commentId, commentIds))
             .groupBy(commentLikes.commentId)
-        : [];
-    const likeCountMap = Object.fromEntries(
-      likeCounts.map((lc) => [lc.commentId, lc.count]),
-    );
-    const userLikes =
+        : Promise.resolve([]),
       session?.id && commentIds.length > 0
-        ? await db
+        ? db
             .select({ commentId: commentLikes.commentId })
             .from(commentLikes)
             .where(
@@ -198,7 +195,11 @@ export async function getMediaComments(mediaId: string) {
                 eq(commentLikes.userId, session.id),
               ),
             )
-        : [];
+        : Promise.resolve([]),
+    ]);
+    const likeCountMap = Object.fromEntries(
+      likeCounts.map((lc) => [lc.commentId, lc.count]),
+    );
     const userLikeSet = new Set(userLikes.map((ul) => ul.commentId));
     const commentsWithLikes = allComments
       .filter((c) => !c.parentCommentId)
@@ -300,21 +301,19 @@ export async function createComment(
       hasLiked: false,
       replies: [],
     };
-    try {
-      broadcastNewComment(comment.id).catch((error) => {
+    after(async () => {
+      await broadcastNewComment(comment.id).catch((error) => {
         logger.error("Failed to broadcast new comment:", error);
       });
-    } catch (error) {
-      logger.error("Failed to broadcast new comment:", error);
-    }
-    try {
-      const { notifyComment } = await import("@/lib/slack-notifications");
-      notifyComment(comment.id).catch((error) => {
-        logger.error("Failed to enqueue Slack comment notification:", error);
-      });
-    } catch (error) {
-      logger.error("Failed to load Slack comment notification:", error);
-    }
+      try {
+        const { notifyComment } = await import("@/lib/slack-notifications");
+        await notifyComment(comment.id).catch((error) => {
+          logger.error("Failed to enqueue Slack comment notification:", error);
+        });
+      } catch (error) {
+        logger.error("Failed to load Slack comment notification:", error);
+      }
+    });
     return { success: true, comment: commentWithLikes };
   } catch (error) {
     logger.error("Error creating comment:", error);

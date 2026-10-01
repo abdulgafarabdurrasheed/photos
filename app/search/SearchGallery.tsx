@@ -1,45 +1,35 @@
 "use client";
 import dynamic from "next/dynamic";
-import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useTransition,
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { FaDice } from "react-icons/fa";
 import {
   HiArrowDown,
   HiArrowDownTray,
   HiArrowPath,
   HiArrowUp,
-  HiCheck,
   HiCheckCircle,
   HiClock,
   HiHeart,
-  HiPhoto,
   HiTrash,
   HiUser,
 } from "react-icons/hi2";
 import { bulkDeleteMedia } from "@/app/actions/bulk";
 import { deleteMedia } from "@/app/actions/media";
 import ChangeOwnerModal from "@/components/media/ChangeOwnerModal";
-import VideoIndicator from "@/components/media/VideoIndicator";
+import GalleryCell from "@/components/media/GalleryCell";
+import VirtualGalleryGrid from "@/components/media/VirtualGalleryGrid";
 import ConfirmModal from "@/components/ui/ConfirmModal";
 import ServerActionModal from "@/components/ui/ServerActionModal";
 import { logger } from "@/lib/client-logger";
+import { resolveMediaDate } from "@/lib/media/exif";
+import { prefetchImage } from "@/lib/media/prefetch";
+import { startViewTransition } from "@/lib/view-transition";
 
 const PhotoDetailModal = dynamic(
   () => import("@/components/media/PhotoDetailModal"),
   { ssr: false },
 );
-
-const INITIAL_VISIBLE_ITEMS = 60;
-const VISIBLE_ITEMS_INCREMENT = 60;
-const THUMBNAIL_AUTO_RETRIES = 5;
 
 function getMediaProxyUrl(
   mediaId: string,
@@ -49,113 +39,23 @@ function getMediaProxyUrl(
   return `/media/${mediaId}`;
 }
 
-function getThumbnailUrl(item: MediaItem) {
-  return (
-    item.thumbnailUrl ||
-    (item.thumbnailS3Key || item.mimeType.startsWith("image/")
-      ? getMediaProxyUrl(item.id, "thumbnail")
-      : undefined)
-  );
-}
-
 function getFullSizeUrl(item: MediaItem) {
   return getMediaProxyUrl(item.id, "original");
 }
 
-let searchGalleryImageObserver: IntersectionObserver | null = null;
-
-function getSearchGalleryImageObserver() {
-  if (typeof window === "undefined") return null;
-  if (searchGalleryImageObserver) return searchGalleryImageObserver;
-  searchGalleryImageObserver = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const element = entry.target as HTMLElement;
-        searchGalleryImageObserver?.unobserve(element);
-        element.dispatchEvent(new CustomEvent("search-gallery-image-visible"));
-      }
-    },
-    { rootMargin: "900px 0px" },
-  );
-  return searchGalleryImageObserver;
+function getDisplayUrl(item: MediaItem) {
+  if (!item.mimeType.startsWith("image/")) return getFullSizeUrl(item);
+  return item.displayUrl ?? getFullSizeUrl(item);
 }
 
-function LazySearchGalleryImage({
-  src,
-  alt,
-  optimize,
-}: {
-  src?: string;
-  alt: string;
-  optimize: boolean;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [isVisible, setIsVisible] = useState(false);
-  const [isLoaded, setIsLoaded] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-
-  useEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    const observer = getSearchGalleryImageObserver();
-    const handleVisible = () => {
-      setIsVisible(true);
-    };
-    element.addEventListener("search-gallery-image-visible", handleVisible, {
-      once: true,
-    });
-    observer?.observe(element);
-    return () => {
-      element.removeEventListener(
-        "search-gallery-image-visible",
-        handleVisible,
-      );
-      observer?.unobserve(element);
-    };
-  }, []);
-
-  return (
-    <div ref={ref} className="relative h-full w-full bg-zinc-800">
-      {(!isVisible || !src || !isLoaded) && (
-        <div className="w-full h-full bg-zinc-800 flex items-center justify-center">
-          <HiPhoto className="w-12 h-12 text-zinc-600 animate-pulse" />
-        </div>
-      )}
-      {isVisible && src && (
-        <Image
-          key={src}
-          src={
-            retryCount > 0
-              ? `${src}${src.includes("?") ? "&" : "?"}retry=${retryCount}`
-              : src
-          }
-          alt={alt}
-          fill
-          unoptimized={!optimize}
-          sizes="(max-width: 767px) 50vw, 240px"
-          className={`object-cover transition-opacity duration-700 ease-out ${
-            isLoaded ? "opacity-100" : "opacity-0"
-          }`}
-          onLoad={() => setIsLoaded(true)}
-          onError={() => {
-            setIsLoaded(false);
-            if (retryCount >= THUMBNAIL_AUTO_RETRIES) return;
-            window.setTimeout(
-              () => setRetryCount((count) => count + 1),
-              350 * (retryCount + 1),
-            );
-          }}
-        />
-      )}
-    </div>
-  );
-}
 export interface MediaItem {
   id: string;
-  s3Url: string;
-  thumbnailS3Key: string | null;
-  thumbnailUrl?: string;
+  s3Url?: string;
+  s3Key?: string;
+  thumbnailS3Key?: string | null;
+  thumbnailUrl?: string | null;
+  displayUrl?: string | null;
+  displayAvifUrl?: string | null;
   filename: string;
   mimeType: string;
   width: number | null;
@@ -164,12 +64,12 @@ export interface MediaItem {
   latitude?: number | null;
   longitude?: number | null;
   uploadedAt: Date;
-  eventId: string;
+  eventId?: string;
   event?: {
     id: string;
     name: string;
     slug: string;
-    visibility?: string;
+    visibility?: "public" | "unlisted" | "auth_required";
   };
   uploadedBy: {
     id: string;
@@ -208,10 +108,6 @@ export default function SearchGallery({
   const [sortBy, setSortBy] = useState<"date" | "likes" | "random">("date");
   const [dateOrder, setDateOrder] = useState<"desc" | "asc">("desc");
   const [randomSeed, setRandomSeed] = useState(Math.random());
-  const fullSizeUrlCacheRef = useRef<Record<string, string>>({});
-  const loadMoreRef = useRef<HTMLDivElement>(null);
-  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_ITEMS);
-  const [_isPending, startTransition] = useTransition();
   const [completed, setCompleted] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -223,109 +119,122 @@ export default function SearchGallery({
   const [mediaToDelete, setMediaToDelete] = useState<string | null>(null);
   useEffect(() => {
     setLocalMedia(media);
-    startTransition(() => setVisibleCount(INITIAL_VISIBLE_ITEMS));
   }, [media]);
+  const sortKeys = useMemo(() => {
+    const map = new Map<
+      string,
+      { date: number; likes: number; hash: number; dateLabel: string }
+    >();
+    for (const item of localMedia) {
+      const date = resolveMediaDate(item.exifData, item.uploadedAt);
+      map.set(item.id, {
+        date: date.getTime(),
+        likes: item.likeCount || 0,
+        dateLabel: date.toLocaleDateString("en-US", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }),
+        hash: (() => {
+          let hash = 0;
+          const value = item.id + randomSeed;
+          for (let i = 0; i < value.length; i++) {
+            hash = (hash << 5) - hash + value.charCodeAt(i);
+            hash &= hash;
+          }
+          return hash;
+        })(),
+      });
+    }
+    return map;
+  }, [localMedia, randomSeed]);
   const sortedMedia = useMemo(() => {
     return [...localMedia].sort((a, b) => {
+      const aKey = sortKeys.get(a.id);
+      const bKey = sortKeys.get(b.id);
+      if (!aKey || !bKey) return 0;
       if (sortBy === "date") {
-        const aExif = a.exifData as {
-          DateTimeOriginal?: string;
-          dateTimeOriginal?: string;
-        } | null;
-        const bExif = b.exifData as {
-          DateTimeOriginal?: string;
-          dateTimeOriginal?: string;
-        } | null;
-        const aDate =
-          aExif?.DateTimeOriginal || aExif?.dateTimeOriginal || a.uploadedAt;
-        const bDate =
-          bExif?.DateTimeOriginal || bExif?.dateTimeOriginal || b.uploadedAt;
-        const diff = new Date(bDate).getTime() - new Date(aDate).getTime();
+        const diff = bKey.date - aKey.date;
         return dateOrder === "desc" ? diff : -diff;
       }
       if (sortBy === "likes") {
-        return (b.likeCount || 0) - (a.likeCount || 0);
+        return bKey.likes - aKey.likes;
       }
-      if (sortBy === "random") {
-        const hash = (str: string) => {
-          let hash = 0;
-          for (let i = 0; i < str.length; i++) {
-            const char = str.charCodeAt(i);
-            hash = (hash << 5) - hash + char;
-            hash = hash & hash;
-          }
-          return hash;
-        };
-        const aHash = hash(a.id + randomSeed);
-        const bHash = hash(b.id + randomSeed);
-        return aHash - bHash;
-      }
-      return 0;
+      return aKey.hash - bKey.hash;
     });
-  }, [localMedia, sortBy, dateOrder, randomSeed]);
-  const resetVisibleItems = () => {
-    startTransition(() => setVisibleCount(INITIAL_VISIBLE_ITEMS));
-  };
-  const updateUrl = (mediaId: string | null) => {
-    const params = new URLSearchParams(searchParams.toString());
-    if (mediaId) {
-      params.set("photo", mediaId);
-    } else {
-      params.delete("photo");
-    }
-    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-  };
-  useEffect(() => {
-    const element = loadMoreRef.current;
-    if (!element) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry.isIntersecting) return;
-        startTransition(() => {
-          setVisibleCount((count) =>
-            Math.min(count + VISIBLE_ITEMS_INCREMENT, sortedMedia.length),
-          );
-        });
-      },
-      { rootMargin: "1200px 0px" },
-    );
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [sortedMedia.length]);
+  }, [localMedia, sortBy, dateOrder, sortKeys]);
+  const mediaById = useMemo(
+    () => new Map(sortedMedia.map((item) => [item.id, item])),
+    [sortedMedia],
+  );
+  const selectedMediaIndex = useMemo(
+    () =>
+      selectedMedia
+        ? sortedMedia.findIndex((item) => item.id === selectedMedia.id)
+        : -1,
+    [sortedMedia, selectedMedia],
+  );
+  const updateUrl = useCallback(
+    (mediaId: string | null) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (mediaId) {
+        params.set("photo", mediaId);
+      } else {
+        params.delete("photo");
+      }
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router, pathname, searchParams],
+  );
 
   const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
+  const [displayUrl, setDisplayUrl] = useState<string | null>(null);
+  const [displayAvifUrl, setDisplayAvifUrl] = useState<string | null>(null);
   useEffect(() => {
     if (!selectedMedia) {
       setFullSizeUrl(null);
+      setDisplayUrl(null);
+      setDisplayAvifUrl(null);
       return;
     }
-    const cachedUrl = fullSizeUrlCacheRef.current[selectedMedia.id];
-    if (cachedUrl) {
-      setFullSizeUrl(cachedUrl);
-      return;
-    }
-    const url = getFullSizeUrl(selectedMedia);
-    fullSizeUrlCacheRef.current[selectedMedia.id] = url;
-    setFullSizeUrl(url);
+    setFullSizeUrl(getFullSizeUrl(selectedMedia));
+    setDisplayUrl(getDisplayUrl(selectedMedia));
+    setDisplayAvifUrl(selectedMedia.displayAvifUrl ?? null);
   }, [selectedMedia]);
 
-  const prefetchFullSizeUrls = useCallback((items: MediaItem[]) => {
-    items.forEach((item) => {
-      fullSizeUrlCacheRef.current[item.id] ||= getFullSizeUrl(item);
-    });
-  }, []);
-
-  const prefetchAdjacentMedia = (item: MediaItem) => {
-    const currentIndex = sortedMedia.findIndex((m) => m.id === item.id);
-    if (currentIndex === -1) return;
-    void prefetchFullSizeUrls(
-      [
+  const prefetchAdjacentMedia = useCallback(
+    (item: MediaItem) => {
+      const currentIndex = sortedMedia.findIndex((m) => m.id === item.id);
+      if (currentIndex === -1) return;
+      for (const neighbor of [
         sortedMedia[currentIndex - 1],
         sortedMedia[currentIndex + 1],
         sortedMedia[currentIndex + 2],
-      ].filter((mediaItem): mediaItem is MediaItem => Boolean(mediaItem)),
-    );
-  };
+      ]) {
+        if (!neighbor || !neighbor.mimeType.startsWith("image/")) continue;
+        prefetchImage(getDisplayUrl(neighbor));
+      }
+    },
+    [sortedMedia],
+  );
+  const openMedia = useCallback(
+    (item: MediaItem) => {
+      startViewTransition(() => {
+        updateUrl(item.id);
+      });
+      prefetchAdjacentMedia(item);
+    },
+    [updateUrl, prefetchAdjacentMedia],
+  );
+  const goToMedia = useCallback(
+    (index: number) => {
+      const nextMedia = sortedMedia[index];
+      if (!nextMedia) return;
+      updateUrl(nextMedia.id);
+      prefetchAdjacentMedia(nextMedia);
+    },
+    [sortedMedia, updateUrl, prefetchAdjacentMedia],
+  );
   const handleDeleteConfirm = async () => {
     if (!mediaToDelete) return;
     try {
@@ -362,7 +271,7 @@ export default function SearchGallery({
       setDownloading(false);
     }
   };
-  const toggleSelection = (itemId: string) => {
+  const toggleSelection = useCallback((itemId: string) => {
     setSelectedItems((prev) => {
       const newSet = new Set(prev);
       if (newSet.has(itemId)) {
@@ -372,7 +281,7 @@ export default function SearchGallery({
       }
       return newSet;
     });
-  };
+  }, []);
   const selectAll = () => {
     setSelectedItems(new Set(sortedMedia.map((item) => item.id)));
   };
@@ -386,7 +295,7 @@ export default function SearchGallery({
     try {
       setDownloading(true);
       for (const itemId of selectedItems) {
-        const item = sortedMedia.find((m) => m.id === itemId);
+        const item = mediaById.get(itemId);
         if (item) {
           await handleDownload(item);
           await new Promise((resolve) => setTimeout(resolve, 200));
@@ -394,8 +303,7 @@ export default function SearchGallery({
       }
       setDownloading(false);
       clearSelection();
-    } catch (error) {
-      logger.error("Bulk download failed:", error);
+    } catch (_error) {
       alert("Failed to download files");
       setDownloading(false);
     }
@@ -420,9 +328,9 @@ export default function SearchGallery({
         }
         setSelectedItems((prev) => {
           const newSet = new Set(prev);
-          result.deletedIds.forEach((id) => {
+          for (const id of result.deletedIds) {
             newSet.delete(id);
-          });
+          }
           return newSet;
         });
       }
@@ -438,13 +346,36 @@ export default function SearchGallery({
       setDeleting(false);
     }
   };
-  const canDeleteSelection = Array.from(selectedItems).every((itemId) => {
-    const item = sortedMedia.find((m) => m.id === itemId);
-    return (
-      item &&
-      (item.canDelete || isAdmin || item.uploadedBy.id === currentUserId)
-    );
-  });
+  const canDeleteSelection = useMemo(() => {
+    for (const itemId of selectedItems) {
+      const item = mediaById.get(itemId);
+      if (
+        !item ||
+        !(item.canDelete || isAdmin || item.uploadedBy.id === currentUserId)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }, [selectedItems, mediaById, isAdmin, currentUserId]);
+
+  const renderBadges = (item: MediaItem) => (
+    <>
+      {sortBy === "date" && (
+        <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 backdrop-blur-sm rounded-full text-xs text-white flex items-center gap-1">
+          <HiClock className="w-3 h-3" />
+          <span>{sortKeys.get(item.id)?.dateLabel ?? ""}</span>
+        </div>
+      )}
+      {sortBy === "likes" && (
+        <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 backdrop-blur-sm rounded-full text-xs text-white flex items-center gap-1">
+          <HiHeart className="w-3 h-3" />
+          <span>{item.likeCount || 0}</span>
+        </div>
+      )}
+    </>
+  );
+
   return (
     <div className="space-y-4">
       {selectionMode && (
@@ -542,10 +473,7 @@ export default function SearchGallery({
             <div className="flex gap-0">
               <button
                 type="button"
-                onClick={() => {
-                  setSortBy("date");
-                  resetVisibleItems();
-                }}
+                onClick={() => startViewTransition(() => setSortBy("date"))}
                 className={`px-3 sm:px-4 py-2 sm:py-2.5 text-sm rounded-l-lg font-medium transition-all flex items-center gap-1 sm:gap-2 ${
                   sortBy === "date"
                     ? "bg-red-600 text-white shadow-lg "
@@ -558,10 +486,11 @@ export default function SearchGallery({
               {sortBy === "date" && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setDateOrder(dateOrder === "desc" ? "asc" : "desc");
-                    resetVisibleItems();
-                  }}
+                  onClick={() =>
+                    startViewTransition(() =>
+                      setDateOrder(dateOrder === "desc" ? "asc" : "desc"),
+                    )
+                  }
                   className="px-2 sm:px-3 py-2 sm:py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-r-lg transition-all shadow-lg border-l border-red-600"
                   title={dateOrder === "desc" ? "Newest first" : "Oldest first"}
                 >
@@ -575,10 +504,7 @@ export default function SearchGallery({
             </div>
             <button
               type="button"
-              onClick={() => {
-                setSortBy("likes");
-                resetVisibleItems();
-              }}
+              onClick={() => startViewTransition(() => setSortBy("likes"))}
               className={`px-3 sm:px-4 py-2 sm:py-2.5 text-sm rounded-lg font-medium transition-all flex items-center gap-1 sm:gap-2 ${
                 sortBy === "likes"
                   ? "bg-red-600 text-white shadow-lg "
@@ -590,11 +516,12 @@ export default function SearchGallery({
             </button>
             <button
               type="button"
-              onClick={() => {
-                setSortBy("random");
-                setRandomSeed(Math.random());
-                resetVisibleItems();
-              }}
+              onClick={() =>
+                startViewTransition(() => {
+                  setSortBy("random");
+                  setRandomSeed(Math.random());
+                })
+              }
               className={`px-3 sm:px-4 py-2 sm:py-2.5 text-sm rounded-lg font-medium transition-all flex items-center gap-1 sm:gap-2 ${
                 sortBy === "random"
                   ? "bg-red-600 text-white shadow-lg "
@@ -608,117 +535,42 @@ export default function SearchGallery({
         </div>
       </div>
 
-      <div className="gallery-card-grid">
-        {sortedMedia
-          .slice(0, Math.min(visibleCount, sortedMedia.length))
-          .map((item) => {
-            const url = getThumbnailUrl(item);
-            const isSelected = selectedItems.has(item.id);
-            const isVideo = item.mimeType.startsWith("video/");
-            const _event = item.event;
-            return (
-              <div
-                key={item.id}
-                className="relative aspect-square bg-zinc-800 rounded-lg overflow-hidden border border-zinc-800 hover:border-zinc-700 transition-all duration-300 hover:scale-[1.02] hover:shadow-xl group"
-              >
-                <button
-                  type="button"
-                  className="w-full h-full"
-                  onClick={() => {
-                    if (selectionMode) {
-                      toggleSelection(item.id);
-                    } else {
-                      updateUrl(item.id);
-                      prefetchAdjacentMedia(item);
-                    }
-                  }}
-                  aria-label={`View ${item.filename}`}
-                >
-                  <LazySearchGalleryImage
-                    key={url ?? item.id}
-                    src={url}
-                    alt={item.filename}
-                    optimize={item.event?.visibility === "public"}
-                  />
-
-                  {isVideo && url && <VideoIndicator size="lg" />}
-
-                  {sortBy === "date" && (
-                    <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 backdrop-blur-sm rounded-full text-xs text-white flex items-center gap-1">
-                      <HiClock className="w-3 h-3" />
-                      <span>
-                        {new Date(
-                          (
-                            item.exifData as {
-                              DateTimeOriginal?: string;
-                              dateTimeOriginal?: string;
-                            }
-                          )?.DateTimeOriginal ||
-                            (
-                              item.exifData as {
-                                DateTimeOriginal?: string;
-                                dateTimeOriginal?: string;
-                              }
-                            )?.dateTimeOriginal ||
-                            item.uploadedAt,
-                        ).toLocaleDateString("en-US", {
-                          year: "numeric",
-                          month: "2-digit",
-                          day: "2-digit",
-                        })}
-                      </span>
-                    </div>
-                  )}
-                  {sortBy === "likes" && (
-                    <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 backdrop-blur-sm rounded-full text-xs text-white flex items-center gap-1">
-                      <HiHeart className="w-3 h-3" />
-                      <span>{item.likeCount || 0}</span>
-                    </div>
-                  )}
-                </button>
-
-                {selectionMode && (
-                  <div className="absolute top-2 left-2 z-10">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleSelection(item.id);
-                      }}
-                      className={`w-8 h-8 rounded-lg backdrop-blur-sm border-2 flex items-center justify-center transition-all hover:bg-zinc-800 ${
-                        isSelected
-                          ? "bg-red-600 border-red-600"
-                          : "bg-zinc-900/80 border-white"
-                      }`}
-                    >
-                      {isSelected && <HiCheck className="w-5 h-5 text-white" />}
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-      </div>
-
-      {visibleCount < sortedMedia.length && (
-        <div
-          ref={loadMoreRef}
-          className="flex h-24 items-center justify-center text-sm text-zinc-500"
-        >
-          Loading more photos...
-        </div>
-      )}
+      <VirtualGalleryGrid
+        items={sortedMedia}
+        itemKey={(item) => item.id}
+        renderItem={(item, index) => (
+          <GalleryCell
+            item={item}
+            selected={selectedItems.has(item.id)}
+            selectionMode={selectionMode}
+            optimize={
+              Boolean(item.thumbnailUrl) || item.event?.visibility === "public"
+            }
+            priority={index < 10}
+            badges={renderBadges(item)}
+            viewTransitionName={
+              selectedMedia?.id === item.id ? undefined : `photo-${item.id}`
+            }
+            onOpen={openMedia}
+            onToggleSelect={toggleSelection}
+          />
+        )}
+      />
 
       {selectedMedia && (
         <PhotoDetailModal
           media={selectedMedia}
           fullSizeUrl={fullSizeUrl}
+          displayUrl={displayUrl}
+          displayAvifUrl={displayAvifUrl}
           event={selectedMedia.event}
           currentUserId={currentUserId}
           isGlobalAdmin={isAdmin}
           downloading={downloading}
           onClose={() => {
-            updateUrl(null);
+            startViewTransition(() => {
+              updateUrl(null);
+            });
           }}
           onMediaUpdate={(updatedMedia) => {
             setLocalMedia((prev) =>
@@ -740,33 +592,18 @@ export default function SearchGallery({
                 }
               : undefined
           }
-          onNext={() => {
-            const currentIndex = sortedMedia.findIndex(
-              (m) => m.id === selectedMedia.id,
-            );
-            if (currentIndex < sortedMedia.length - 1) {
-              const nextMedia = sortedMedia[currentIndex + 1];
-              updateUrl(nextMedia.id);
-              prefetchAdjacentMedia(nextMedia);
-            }
-          }}
-          onPrevious={() => {
-            const currentIndex = sortedMedia.findIndex(
-              (m) => m.id === selectedMedia.id,
-            );
-            if (currentIndex > 0) {
-              const prevMedia = sortedMedia[currentIndex - 1];
-              updateUrl(prevMedia.id);
-              prefetchAdjacentMedia(prevMedia);
-            }
-          }}
-          hasNext={
-            sortedMedia.findIndex((m) => m.id === selectedMedia.id) <
-            sortedMedia.length - 1
+          onNext={
+            selectedMediaIndex < sortedMedia.length - 1
+              ? () => goToMedia(selectedMediaIndex + 1)
+              : undefined
           }
-          hasPrevious={
-            sortedMedia.findIndex((m) => m.id === selectedMedia.id) > 0
+          onPrevious={
+            selectedMediaIndex > 0
+              ? () => goToMedia(selectedMediaIndex - 1)
+              : undefined
           }
+          hasNext={selectedMediaIndex < sortedMedia.length - 1}
+          hasPrevious={selectedMediaIndex > 0}
         />
       )}
 

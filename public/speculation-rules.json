@@ -1,0 +1,16 @@
+{
+  "prefetch": [
+    {
+      "where": { "href_matches": "/events/*" },
+      "eagerness": "moderate"
+    },
+    {
+      "where": { "href_matches": "/series/*" },
+      "eagerness": "moderate"
+    },
+    {
+      "where": { "href_matches": "/feed" },
+      "eagerness": "conservative"
+    }
+  ]
+}

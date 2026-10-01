@@ -64,9 +64,11 @@ interface MediaItem {
   id: string;
   filename: string;
   mimeType: string;
-  s3Key: string;
-  s3Url: string;
-  thumbnailS3Key: string | null;
+  s3Key?: string;
+  s3Url?: string;
+  thumbnailS3Key?: string | null;
+  thumbnailUrl?: string | null;
+  displayUrl?: string | null;
   width: number | null;
   height: number | null;
   exifData: Record<string, unknown> | null;

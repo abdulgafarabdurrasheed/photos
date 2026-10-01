@@ -4,7 +4,7 @@ import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { events, media } from "@/lib/db/schema";
 import { logger } from "@/lib/logger";
-import { getMediaProxyUrl } from "@/lib/media/s3";
+import { getMediaThumbnailUrl } from "@/lib/media/urls";
 import { getAccessibleEventIds, getUserContext } from "@/lib/policy";
 export async function getMapData(eventSlug?: string | null) {
   try {
@@ -80,7 +80,7 @@ export async function getMapData(eventSlug?: string | null) {
             id: item.id,
             filename: item.filename,
             mimeType: item.mimeType,
-            thumbnailUrl: getMediaProxyUrl(item.id, "thumbnail"),
+            thumbnailUrl: getMediaThumbnailUrl(item.id, "sm"),
             lat: lat,
             lng: lng,
             uploadedAt: item.uploadedAt,
@@ -162,7 +162,7 @@ export async function getMapData(eventSlug?: string | null) {
         photoCount: mediaCountByEventId.get(event.id) ?? 0,
         photos: event.media.map((item) => ({
           ...item,
-          thumbnailUrl: getMediaProxyUrl(item.id, "thumbnail"),
+          thumbnailUrl: getMediaThumbnailUrl(item.id, "sm"),
         })),
       });
     }

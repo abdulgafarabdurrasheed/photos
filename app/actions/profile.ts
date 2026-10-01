@@ -2,6 +2,7 @@
 import { and, count, desc, eq, inArray } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { leanMediaColumns } from "@/lib/db/lean-columns";
 import {
   eventParticipants,
   faceMatchSuggestions,
@@ -12,6 +13,7 @@ import {
   users,
 } from "@/lib/db/schema";
 import { logger } from "@/lib/logger";
+import { toClientMedia } from "@/lib/media/client-media";
 import { getAssetProxyUrl } from "@/lib/media/s3";
 import {
   augmentMediaWithPermissions,
@@ -31,31 +33,34 @@ export async function getUserProfileData(userId: string) {
     if (currentUser?.isBanned) {
       return { success: false, error: "Unauthorized" };
     }
-    const user = await db.query.users.findFirst({
-      where: eq(users.id, userId),
-      columns: {
-        id: true,
-        isBanned: true,
-      },
-    });
+    const [user, privacy] = await Promise.all([
+      db.query.users.findFirst({
+        where: eq(users.id, userId),
+        columns: {
+          id: true,
+          isBanned: true,
+        },
+      }),
+      db.query.facePrivacyPreferences.findFirst({
+        where: eq(facePrivacyPreferences.userId, userId),
+      }),
+    ]);
     if (!user) {
       return { success: false, error: "User not found" };
     }
     if (user.isBanned) {
       return { success: false, error: "User is banned" };
     }
-    const privacy = await db.query.facePrivacyPreferences.findFirst({
-      where: eq(facePrivacyPreferences.userId, userId),
-    });
     const privilegedViewer =
       currentUser?.id === userId || currentUser?.isGlobalAdmin === true;
     if (privacy?.hideProfile && !privilegedViewer) {
       return { success: false, error: "User not found" };
     }
-    const userUploads = await db.query.media.findMany({
+    const userUploadsPromise = db.query.media.findMany({
       where: eq(media.uploadedById, userId),
       orderBy: [desc(media.uploadedAt)],
       limit: PROFILE_MEDIA_LIMIT,
+      columns: leanMediaColumns,
       with: {
         event: true,
         uploadedBy: {
@@ -68,12 +73,13 @@ export async function getUserProfileData(userId: string) {
         },
       },
     });
-    const userLikes = await db.query.mediaLikes.findMany({
+    const userLikesPromise = db.query.mediaLikes.findMany({
       where: eq(mediaLikes.userId, userId),
       orderBy: [desc(mediaLikes.createdAt)],
       limit: PROFILE_MEDIA_LIMIT,
       with: {
         media: {
+          columns: leanMediaColumns,
           with: {
             event: true,
             uploadedBy: {
@@ -88,15 +94,13 @@ export async function getUserProfileData(userId: string) {
         },
       },
     });
-    const likedMedia = userLikes
-      .map((like) => like.media)
-      .filter((m) => m !== null);
-    const userMentions = await db.query.mediaMentions.findMany({
+    const userMentionsPromise = db.query.mediaMentions.findMany({
       where: eq(mediaMentions.userId, userId),
       orderBy: [desc(mediaMentions.createdAt)],
       limit: PROFILE_MEDIA_LIMIT,
       with: {
         media: {
+          columns: leanMediaColumns,
           with: {
             event: true,
             uploadedBy: {
@@ -111,13 +115,10 @@ export async function getUserProfileData(userId: string) {
         },
       },
     });
-    const mentionedMedia = userMentions
-      .map((mention) => mention.media)
-      .filter((m) => m !== null);
-    const suggestionRows =
+    const suggestionRowsPromise =
       privacy?.hideMentions && !privilegedViewer
-        ? []
-        : await db.query.faceMatchSuggestions.findMany({
+        ? Promise.resolve([] as never[])
+        : db.query.faceMatchSuggestions.findMany({
             where: and(
               eq(faceMatchSuggestions.userId, userId),
               eq(faceMatchSuggestions.status, "pending"),
@@ -126,6 +127,7 @@ export async function getUserProfileData(userId: string) {
             limit: PROFILE_MEDIA_LIMIT,
             with: {
               media: {
+                columns: leanMediaColumns,
                 with: {
                   event: true,
                   uploadedBy: {
@@ -140,6 +142,19 @@ export async function getUserProfileData(userId: string) {
               },
             },
           });
+    const [userUploads, userLikes, userMentions, suggestionRows] =
+      await Promise.all([
+        userUploadsPromise,
+        userLikesPromise,
+        userMentionsPromise,
+        suggestionRowsPromise,
+      ]);
+    const likedMedia = userLikes
+      .map((like) => like.media)
+      .filter((m) => m !== null);
+    const mentionedMedia = userMentions
+      .map((mention) => mention.media)
+      .filter((m) => m !== null);
     const visibleSuggestionRows = [];
     for (const suggestion of suggestionRows) {
       const eventAdmin = Boolean(
@@ -314,15 +329,15 @@ export async function getUserProfileData(userId: string) {
       success: true,
       data: {
         uploads: augmentedUploads.map((u) => ({
-          ...u,
+          ...toClientMedia(u),
           likeCount: likeCountByMediaId.get(u.id) ?? 0,
         })),
         likes: augmentedLikes.map((m) => ({
-          ...m,
+          ...toClientMedia(m),
           likeCount: likeCountByMediaId.get(m.id) ?? 0,
         })),
         mentions: augmentedMentions.map((m) => ({
-          ...m,
+          ...toClientMedia(m),
           likeCount: likeCountByMediaId.get(m.id) ?? 0,
         })),
         events: joinedEvents.filter((e) => e !== null),

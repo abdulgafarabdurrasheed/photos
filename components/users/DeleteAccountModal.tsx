@@ -2,9 +2,7 @@
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import { HiDocumentText, HiTrash, HiXMark } from "react-icons/hi2";
-import { getBulkMediaUrls } from "@/app/actions/bulk";
 import UserAvatar from "@/components/ui/UserAvatar";
-import { logger } from "@/lib/client-logger";
 
 interface User {
   name: string;
@@ -12,8 +10,10 @@ interface User {
   slackId?: string | null;
 }
 interface Upload {
-  s3Key: string;
+  id: string;
+  thumbnailUrl?: string | null;
   thumbnailS3Key?: string | null;
+  s3Key?: string;
 }
 interface Props {
   isOpen: boolean;
@@ -38,7 +38,6 @@ export default function DeleteAccountModal({
 }: Props) {
   const [step, setStep] = useState(0);
   const [timer, setTimer] = useState(5);
-  const [previewMap, setPreviewMap] = useState<Record<string, string>>({});
   const [deletingIndex, setDeletingIndex] = useState(-1);
   const [holdProgress, setHoldProgress] = useState(0);
   const [isHolding, setIsHolding] = useState(false);
@@ -50,27 +49,8 @@ export default function DeleteAccountModal({
       setDeletingIndex(-1);
       setHoldProgress(0);
       setIsHolding(false);
-      const fetchPreviews = async () => {
-        if (uploads.length > 0) {
-          try {
-            const keys = uploads
-              .slice(0, 50)
-              .map((u) => u.thumbnailS3Key || u.s3Key)
-              .filter(Boolean);
-            if (keys.length > 0) {
-              const result = await getBulkMediaUrls(keys);
-              if (result.success && result.urls) {
-                setPreviewMap(result.urls);
-              }
-            }
-          } catch (e) {
-            logger.error("Failed to fetch previews:", e);
-          }
-        }
-      };
-      fetchPreviews();
     }
-  }, [isOpen, uploads]);
+  }, [isOpen]);
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (step < 2 && timer > 0) {
@@ -201,8 +181,7 @@ export default function DeleteAccountModal({
 
               <div className="grid grid-cols-3 gap-2 my-4 opacity-75">
                 {uploads.slice(0, 6).map((upload, i) => {
-                  const key = upload.thumbnailS3Key || upload.s3Key;
-                  const url = previewMap[key];
+                  const url = upload.thumbnailUrl;
                   return (
                     <div
                       key={i}
@@ -362,8 +341,7 @@ export default function DeleteAccountModal({
                 <HiTrash className="w-24 h-24 text-red-600" />
 
                 {uploads.slice(0, 50).map((upload, i) => {
-                  const key = upload.thumbnailS3Key || upload.s3Key;
-                  const url = previewMap[key];
+                  const url = upload.thumbnailUrl;
                   const isDeleting = deletingIndex > i;
                   const randomX = (i % 5) * 20 - 40;
                   return (

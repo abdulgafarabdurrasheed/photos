@@ -1,8 +1,9 @@
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { and, count, eq, inArray, sql } from "drizzle-orm";
-import { db } from "@/lib/db";
 import { auditLog } from "@/lib/audit";
+import { createBlurThumbnail, renderBlurredPhoto } from "@/lib/blur-render";
+import { db } from "@/lib/db";
 import {
   blurRequests,
   eventFaceIndexes,
@@ -19,7 +20,6 @@ import {
 } from "@/lib/db/schema";
 import { decryptFaceTemplate, encryptFaceTemplate } from "@/lib/face-crypto";
 import { logger } from "@/lib/logger";
-import { createBlurThumbnail, renderBlurredPhoto } from "@/lib/blur-render";
 import { uploadToS3 } from "@/lib/media/s3";
 import {
   cancelVisionJob,

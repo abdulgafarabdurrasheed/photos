@@ -12,6 +12,7 @@ import {
   users,
 } from "@/lib/db/schema";
 import { logger } from "@/lib/logger";
+import { toClientMedia } from "@/lib/media/client-media";
 import { getMediaProxyUrl } from "@/lib/media/s3";
 import {
   augmentMediaWithPermissions,
@@ -20,27 +21,12 @@ import {
   getUserContext,
 } from "@/lib/policy";
 import { type PublicUser, toPublicUser } from "@/lib/user-display";
+import type { MediaItem } from "@/types/media";
 
 function toSafeMedia(item: any) {
-  const {
-    s3Key: _s3Key,
-    s3Url: _s3Url,
-    thumbnailS3Key: _thumbnailS3Key,
-    originalS3Key: _originalS3Key,
-    originalThumbnailS3Key: _originalThumbnailS3Key,
-    blurredS3Key: _blurredS3Key,
-    blurredThumbnailS3Key: _blurredThumbnailS3Key,
-    exifData: _exifData,
-    latitude: _latitude,
-    longitude: _longitude,
-    ...safe
-  } = item;
   return {
-    ...safe,
-    event: safe.event ? withoutInviteCode(safe.event) : undefined,
+    ...toClientMedia(item, { stripLocation: true }),
     url: getMediaProxyUrl(item.id),
-    thumbnailUrl: getMediaProxyUrl(item.id, "thumbnail"),
-    uploadedBy: item.uploadedBy ? toPublicUser(item.uploadedBy) : undefined,
   };
 }
 
@@ -55,10 +41,7 @@ export type SearchResults = {
   users: PublicUser[];
   events: Omit<typeof events.$inferSelect, "inviteCode">[];
   series: (typeof series.$inferSelect)[];
-  media: (typeof media.$inferSelect & {
-    event: typeof events.$inferSelect;
-    uploadedBy: PublicUser;
-  })[];
+  media: (MediaItem & { url: string })[];
   tags: (typeof tags.$inferSelect)[];
 };
 

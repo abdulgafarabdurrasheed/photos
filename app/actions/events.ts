@@ -21,7 +21,7 @@ import {
   deleteMediaAndThumbnail,
 } from "@/lib/media/thumbnail";
 import { claimPendingAdminGrantsForUser } from "@/lib/pending-admins";
-import { can, getUserContext } from "@/lib/policy";
+import { can, getUserContext, invalidateUserContext } from "@/lib/policy";
 import { publicEvent } from "@/lib/public-data";
 import { deleteVisionGallery } from "@/lib/vision-client";
 export async function joinEvent(eventId: string, inviteCode?: string) {
@@ -410,6 +410,7 @@ export async function createEvent(data: EventInput) {
       eventId: newEvent.id,
       userId: user.id,
     });
+    invalidateUserContext(user.id);
     await auditLog(user.id, "create", "event", newEvent.id, {
       name,
       slug,

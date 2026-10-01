@@ -16,6 +16,8 @@ const nextConfig: NextConfig = {
   images: {
     formats: ["image/avif", "image/webp"],
     minimumCacheTTL: 31536000,
+    deviceSizes: [640, 828, 1200, 1600],
+    imageSizes: [96, 128, 192, 256, 384],
     localPatterns: [
       {
         pathname: "/hackclub-icon.png",

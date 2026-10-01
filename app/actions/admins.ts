@@ -14,7 +14,7 @@ import {
   users,
 } from "@/lib/db/schema";
 import { logger } from "@/lib/logger";
-import { can, getUserContext } from "@/lib/policy";
+import { can, getUserContext, invalidateUserContext } from "@/lib/policy";
 import { isValidSlackId, normalizeSlackId } from "@/lib/slack-id";
 import { toPublicUser } from "@/lib/user-display";
 export async function getEventAdmins(eventId: string) {
@@ -175,6 +175,7 @@ export async function addAdmin(
         userId: targetUser.id,
       });
     }
+    invalidateUserContext(targetUser.id);
     await auditLog(currentUser.id, "update", entityType, entityId, {
       action: "add_admin",
       targetUserId: targetUser.id,
@@ -218,6 +219,7 @@ export async function removeAdmin(
             eq(eventAdmins.userId, userId),
           ),
         );
+      invalidateUserContext(userId);
     } else {
       await db
         .delete(seriesAdmins)
@@ -227,6 +229,7 @@ export async function removeAdmin(
             eq(seriesAdmins.userId, userId),
           ),
         );
+      invalidateUserContext(userId);
     }
     await auditLog(currentUser.id, "update", entityType, entityId, {
       action: "remove_admin",
@@ -451,6 +454,7 @@ export async function adminUpdateUser(
         updatedAt: new Date(),
       })
       .where(eq(users.id, userId));
+    invalidateUserContext(userId);
     await auditLog(currentUser.id, "update", "user", userId, {
       changes: Object.keys(data),
     });
@@ -536,6 +540,7 @@ export async function toggleGlobalAdmin(userId: string) {
         updatedAt: new Date(),
       })
       .where(eq(users.id, userId));
+    invalidateUserContext(userId);
     await auditLog(
       currentUser.id,
       newStatus ? "promote" : "demote",

@@ -320,10 +320,44 @@ async function checkCommentPermission(
   return false;
 }
 
+const USER_CONTEXT_TTL_MS = 15_000;
+
+const userContextCache = new Map<
+  string,
+  { expiry: number; promise: Promise<UserContext | null> }
+>();
+
+export function invalidateUserContext(userId: string) {
+  userContextCache.delete(userId);
+}
+
 export async function getUserContext(
   userId: string | undefined,
 ): Promise<UserContext | null> {
   if (!userId) return null;
+  const now = Date.now();
+  const hit = userContextCache.get(userId);
+  if (hit && hit.expiry > now) return await hit.promise;
+  const promise = fetchUserContext(userId);
+  userContextCache.set(userId, { expiry: now + USER_CONTEXT_TTL_MS, promise });
+  try {
+    const ctx = await promise;
+    if (userContextCache.size > 512) {
+      for (const [key, entry] of userContextCache) {
+        if (entry.expiry <= now) userContextCache.delete(key);
+      }
+      if (userContextCache.size > 512) userContextCache.clear();
+    }
+    return ctx;
+  } catch (error) {
+    if (userContextCache.get(userId)?.promise === promise) {
+      userContextCache.delete(userId);
+    }
+    throw error;
+  }
+}
+
+async function fetchUserContext(userId: string): Promise<UserContext | null> {
   const user = await db.query.users.findFirst({
     where: and(eq(users.id, userId), isNull(users.deletedAt)),
     columns: {

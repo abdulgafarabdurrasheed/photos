@@ -1,6 +1,7 @@
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { resolveMediaDate } from "@/lib/media/exif";
+import { prefetchImage } from "@/lib/media/prefetch";
 import type { Event, MediaItem } from "@/types/media";
 
 function getMediaProxyUrl(
@@ -11,18 +12,24 @@ function getMediaProxyUrl(
   return `/media/${mediaId}`;
 }
 
-function getFullSizeProxyUrl(item: MediaItem) {
-  return getMediaProxyUrl(item.id, "original");
-}
-
 function isImageMedia(item: MediaItem) {
   return item.mimeType.startsWith("image/");
 }
 
 function getThumbnailProxyUrl(item: MediaItem) {
+  if (item.thumbnailUrl) return item.thumbnailUrl;
   return item.thumbnailS3Key || isImageMedia(item)
     ? getMediaProxyUrl(item.id, "thumbnail")
     : null;
+}
+
+function getFullSizeProxyUrl(item: MediaItem) {
+  return getMediaProxyUrl(item.id, "original");
+}
+
+function getDisplayProxyUrl(item: MediaItem) {
+  if (!isImageMedia(item)) return getFullSizeProxyUrl(item);
+  return item.displayUrl ?? getFullSizeProxyUrl(item);
 }
 
 function shouldReduceMediaPrefetch() {
@@ -35,6 +42,23 @@ function shouldReduceMediaPrefetch() {
       (navigator.hardwareConcurrency || 4) <= 4,
   );
 }
+
+function hashString(value: string) {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    const char = value.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash;
+  }
+  return hash;
+}
+
+const DATE_LABEL_OPTIONS: Intl.DateTimeFormatOptions = {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+};
+
 export function useMediaGalleryData(
   media: MediaItem[],
   events: Event[],
@@ -54,7 +78,11 @@ export function useMediaGalleryData(
   const pathname = usePathname();
   const searchParams = useSearchParams();
   useEffect(() => {
-    setLocalMedia(media);
+    setLocalMedia((prev) => {
+      const serverIds = new Set(media.map((m) => m.id));
+      const liveOnly = prev.filter((m) => !serverIds.has(m.id));
+      return liveOnly.length > 0 ? [...liveOnly, ...media] : media;
+    });
   }, [media]);
   const eventMap = useMemo(() => {
     const map = new Map<string, Event>();
@@ -63,6 +91,33 @@ export function useMediaGalleryData(
     });
     return map;
   }, [events]);
+  const { sortKeys, dateLabels } = useMemo(() => {
+    const keys = new Map<
+      string,
+      {
+        date: number;
+        uploader: string;
+        likes: number;
+        hash: number;
+        eventName: string;
+      }
+    >();
+    const labels = new Map<string, string>();
+    for (const item of localMedia) {
+      const event =
+        item.event || (item.eventId ? eventMap.get(item.eventId) : null);
+      const date = resolveMediaDate(item.exifData, item.uploadedAt);
+      keys.set(item.id, {
+        date: date.getTime(),
+        uploader: item.uploadedBy?.name || "",
+        likes: item.likeCount || 0,
+        hash: hashString(item.id + randomSeed),
+        eventName: event?.name || "",
+      });
+      labels.set(item.id, date.toLocaleDateString("en-US", DATE_LABEL_OPTIONS));
+    }
+    return { sortKeys: keys, dateLabels: labels };
+  }, [localMedia, randomSeed, eventMap]);
   const sortedMedia = useMemo(() => {
     const filteredMedia = localMedia.filter((item) => {
       if (filter === "photos" && !item.mimeType.startsWith("image/"))
@@ -72,37 +127,25 @@ export function useMediaGalleryData(
       return true;
     });
     return [...filteredMedia].sort((a, b) => {
+      const aKey = sortKeys.get(a.id);
+      const bKey = sortKeys.get(b.id);
+      if (!aKey || !bKey) return 0;
       if (sortBy === "date") {
-        const aDate = resolveMediaDate(a.exifData, a.uploadedAt);
-        const bDate = resolveMediaDate(b.exifData, b.uploadedAt);
-        const diff = bDate.getTime() - aDate.getTime();
+        const diff = bKey.date - aKey.date;
         return dateOrder === "desc" ? diff : -diff;
       }
       if (sortBy === "uploader") {
-        return (a.uploadedBy?.name || "").localeCompare(
-          b.uploadedBy?.name || "",
-        );
+        return aKey.uploader.localeCompare(bKey.uploader);
       }
       if (sortBy === "likes") {
-        return (b.likeCount || 0) - (a.likeCount || 0);
+        return bKey.likes - aKey.likes;
       }
       if (sortBy === "random") {
-        const hash = (str: string) => {
-          let hash = 0;
-          for (let i = 0; i < str.length; i++) {
-            const char = str.charCodeAt(i);
-            hash = (hash << 5) - hash + char;
-            hash = hash & hash;
-          }
-          return hash;
-        };
-        return hash(a.id + randomSeed) - hash(b.id + randomSeed);
+        return aKey.hash - bKey.hash;
       }
-      const eventA = a.event || (a.eventId ? eventMap.get(a.eventId) : null);
-      const eventB = b.event || (b.eventId ? eventMap.get(b.eventId) : null);
-      return (eventA?.name || "").localeCompare(eventB?.name || "");
+      return aKey.eventName.localeCompare(bKey.eventName);
     });
-  }, [localMedia, filter, sortBy, dateOrder, eventMap, randomSeed]);
+  }, [localMedia, filter, sortBy, dateOrder, sortKeys]);
   useEffect(() => {
     if (initialPhotoId) {
       const photo = localMedia.find((m) => m.id === initialPhotoId);
@@ -118,10 +161,16 @@ export function useMediaGalleryData(
     }
     router.replace(`${pathname}?${params.toString()}`, { scroll: false });
   };
-  const getThumbnailUrl = useCallback(getThumbnailProxyUrl, []);
   const selectedThumbnailUrl = selectedMedia
     ? getThumbnailProxyUrl(selectedMedia)
     : null;
+  const selectedDisplayUrl = selectedMedia
+    ? getDisplayProxyUrl(selectedMedia)
+    : null;
+  const selectedDisplayAvifUrl =
+    selectedMedia && isImageMedia(selectedMedia)
+      ? (selectedMedia.displayAvifUrl ?? null)
+      : null;
 
   const refreshFullSizeUrl = useCallback(
     (mediaToLoad?: MediaItem | null) => {
@@ -144,14 +193,10 @@ export function useMediaGalleryData(
 
   const prefetchFullSizeUrls = useCallback((items: MediaItem[]) => {
     if (shouldReduceMediaPrefetch()) return;
-    const uncachedItems = items.filter(
-      (item) => !fullSizeUrlCacheRef.current[item.id],
-    );
-    if (uncachedItems.length === 0) return;
-
-    uncachedItems.forEach((item) => {
-      fullSizeUrlCacheRef.current[item.id] = getFullSizeProxyUrl(item);
-    });
+    for (const item of items) {
+      if (!isImageMedia(item)) continue;
+      prefetchImage(item.displayAvifUrl ?? getDisplayProxyUrl(item));
+    }
   }, []);
 
   useEffect(() => {
@@ -169,15 +214,17 @@ export function useMediaGalleryData(
     setDateOrder,
     randomSeed,
     setRandomSeed,
-    getThumbnailUrl,
     selectedMedia,
     setSelectedMedia,
     selectedThumbnailUrl,
+    selectedDisplayUrl,
+    selectedDisplayAvifUrl,
     fullSizeUrl,
     setFullSizeUrl,
     refreshFullSizeUrl,
     prefetchFullSizeUrls,
     sortedMedia,
+    dateLabels,
     eventMap,
     updateUrl,
   };

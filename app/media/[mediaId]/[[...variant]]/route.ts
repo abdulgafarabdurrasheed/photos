@@ -10,7 +10,18 @@ import { db } from "@/lib/db";
 import { media, users } from "@/lib/db/schema";
 import { logger } from "@/lib/logger";
 import { getSignedUploadUrl, S3_BUCKET_NAME, s3Client } from "@/lib/media/s3";
-import { getThumbnailS3Key } from "@/lib/media/thumbnail";
+import {
+  generateThumbnailDerivative,
+  getDerivativeSourceTag,
+  getThumbnailDerivativeS3Key,
+  getThumbnailS3Key,
+} from "@/lib/media/thumbnail";
+import {
+  type MediaVariant,
+  parseMediaImageFormat,
+  parseMediaImageSize,
+  verifyMediaAccess,
+} from "@/lib/media/urls";
 import { ALLOWED_IMAGE_TYPES } from "@/lib/media/validation";
 import { can } from "@/lib/policy";
 import { contentDispositionFilename } from "@/lib/safe-filename";
@@ -32,6 +43,19 @@ async function fetchMediaObject(
     }),
     { abortSignal: request.signal },
   );
+}
+
+async function readS3ObjectToBuffer(key: string): Promise<Buffer> {
+  const response = await s3Client.send(
+    new GetObjectCommand({
+      Bucket: S3_BUCKET_NAME,
+      Key: key,
+    }),
+  );
+  const body = response.Body as unknown as {
+    transformToByteArray(): Promise<Uint8Array>;
+  };
+  return Buffer.from(await body.transformToByteArray());
 }
 
 async function isAllowedToViewMedia(
@@ -196,8 +220,23 @@ export async function GET(
   if (variant && !["thumbnail", "original"].includes(variant)) {
     return new NextResponse("Not found", { status: 404 });
   }
+  if (variant === "original") {
+    return new NextResponse("Not found", { status: 404 });
+  }
   const searchParams = request.nextUrl.searchParams;
   const download = searchParams.get("download") === "true";
+  const size = parseMediaImageSize(searchParams.get("size"));
+  const format =
+    parseMediaImageFormat(searchParams.get("fmt")) === "avif" ? "avif" : null;
+  const mediaVariant: MediaVariant =
+    variant === "thumbnail" ? "thumbnail" : "original";
+  const signatureValid = verifyMediaAccess(
+    mediaId,
+    mediaVariant,
+    size,
+    searchParams.get("sig"),
+    format,
+  );
   const requestRange = request.headers.get("range") ?? undefined;
   if (requestRange && !/^bytes=\d*-\d*(,\d*-\d*)?$/.test(requestRange)) {
     return new NextResponse("Invalid range", { status: 416 });
@@ -231,7 +270,8 @@ export async function GET(
       { status: 423 },
     );
   }
-  const isAllowed = await isAllowedToViewMedia(mediaItem, request);
+  const isAllowed =
+    signatureValid || (await isAllowedToViewMedia(mediaItem, request));
   if (!isAllowed) {
     return new NextResponse("Unauthorized", { status: 401 });
   }
@@ -262,8 +302,34 @@ export async function GET(
       s3Key = getThumbnailS3Key(mediaItem.id);
     }
   }
+  const sourceTag = getDerivativeSourceTag(mediaItem.blurStatus);
+  const isImage = mediaItem.mimeType.startsWith("image/");
+  const wantsSm = variant === "thumbnail" && size === "sm";
+  const wantsLg = variant !== "thumbnail" && size === "lg" && isImage;
+  let derivativeKind: "thumb-sm" | "display" | null = null;
+  let derivativeKey: string | null = null;
+  if (wantsSm) {
+    derivativeKind = "thumb-sm";
+    derivativeKey = getThumbnailDerivativeS3Key(
+      mediaItem.id,
+      "thumb-sm",
+      sourceTag,
+    );
+  } else if (wantsLg) {
+    derivativeKind = "display";
+    derivativeKey = getThumbnailDerivativeS3Key(
+      mediaItem.id,
+      "display",
+      sourceTag,
+      format === "avif" ? "avif" : "jpg",
+    );
+    const baseName =
+      filename.substring(0, filename.lastIndexOf(".")) || filename;
+    filename = `display_${baseName}.${format === "avif" ? "avif" : "jpg"}`;
+  }
   let s3Response: GetObjectCommandOutput;
   let responseBody: BodyInit | ReadableStream;
+  let servedDerivative = false;
   try {
     if (!mediaItem.thumbnailS3Key && variant === "thumbnail") {
       await db
@@ -271,7 +337,46 @@ export async function GET(
         .set({ thumbnailS3Key: s3Key })
         .where(eq(media.id, mediaItem.id));
     }
-    s3Response = await fetchMediaObject(s3Key, request, requestRange);
+    if (derivativeKey && derivativeKind) {
+      try {
+        s3Response = await fetchMediaObject(
+          derivativeKey,
+          request,
+          requestRange,
+        );
+        servedDerivative = true;
+      } catch (error: any) {
+        if (error?.$metadata?.httpStatusCode === 304) throw error;
+        const sourceBuffer = await readS3ObjectToBuffer(s3Key).catch(
+          () => null,
+        );
+        const generated = sourceBuffer
+          ? await generateThumbnailDerivative({
+              mediaId,
+              kind: derivativeKind,
+              sourceTag,
+              sourceBuffer,
+              tags: {
+                uploadedBy: mediaItem.uploadedById,
+                eventId: mediaItem.eventId ?? "",
+              },
+              signal: request.signal,
+            })
+          : null;
+        if (generated && derivativeKey) {
+          s3Response = await fetchMediaObject(
+            derivativeKey,
+            request,
+            requestRange,
+          );
+          servedDerivative = true;
+        } else {
+          s3Response = await fetchMediaObject(s3Key, request, requestRange);
+        }
+      }
+    } else {
+      s3Response = await fetchMediaObject(s3Key, request, requestRange);
+    }
     responseBody = s3Response.Body as ReadableStream;
   } catch (error: any) {
     if (error?.$metadata?.httpStatusCode === 304) {
@@ -283,8 +388,12 @@ export async function GET(
   const headers = new Headers();
   headers.set(
     "Content-Type",
-    s3Response.ContentType ||
-      (variant === "thumbnail" ? "image/jpeg" : mediaItem.mimeType),
+    servedDerivative
+      ? format === "avif"
+        ? "image/avif"
+        : "image/jpeg"
+      : s3Response.ContentType ||
+          (variant === "thumbnail" ? "image/jpeg" : mediaItem.mimeType),
   );
   headers.set("X-Content-Type-Options", "nosniff");
   if (s3Response.ContentLength) {
@@ -302,13 +411,22 @@ export async function GET(
   if (s3Response.ContentRange) {
     headers.set("Content-Range", s3Response.ContentRange);
   }
-  if (variant === "original") {
-    return new NextResponse("Not found", { status: 404 });
-  }
   const isPartialContent = Boolean(s3Response.ContentRange);
   if (isPartialContent) {
     headers.set("Cache-Control", "private, no-store");
     headers.set("CDN-Cache-Control", "no-store");
+  } else if (servedDerivative) {
+    if (signatureValid) {
+      const immutable = "public, max-age=31536000, immutable";
+      headers.set("Cache-Control", immutable);
+      headers.set("CDN-Cache-Control", immutable);
+    } else {
+      headers.set(
+        "Cache-Control",
+        "private, max-age=86400, stale-while-revalidate=604800",
+      );
+      headers.set("CDN-Cache-Control", "no-store");
+    }
   } else if (mediaItem.blurStatus === "approved") {
     headers.set("Cache-Control", "no-store, max-age=0");
     headers.set("CDN-Cache-Control", "no-store");
@@ -317,8 +435,24 @@ export async function GET(
     const cdnCache = "public, max-age=3600, stale-while-revalidate=86400";
     headers.set("Cache-Control", browserCache);
     headers.set("CDN-Cache-Control", cdnCache);
+  } else if (variant === "thumbnail") {
+    if (signatureValid) {
+      const cached = "public, max-age=3600, stale-while-revalidate=86400";
+      headers.set("Cache-Control", cached);
+      headers.set("CDN-Cache-Control", cached);
+    } else {
+      headers.set(
+        "Cache-Control",
+        "private, max-age=86400, stale-while-revalidate=604800",
+      );
+      headers.set("CDN-Cache-Control", "no-store");
+    }
   } else {
-    headers.set("Cache-Control", "private, no-store");
+    headers.set(
+      "Cache-Control",
+      "private, max-age=3600, stale-while-revalidate=86400",
+    );
+    headers.set("CDN-Cache-Control", "no-store");
   }
   if (download) {
     headers.set("Content-Disposition", `attachment; filename="${filename}"`);

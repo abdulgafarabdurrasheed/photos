@@ -1,5 +1,3 @@
-import exifr from "exifr";
-import { logger } from "@/lib/logger";
 export interface ExifData {
   [key: string]: unknown;
   make?: string;
@@ -103,6 +101,7 @@ export async function extractExifData(
   buffer: Buffer,
   contextInfo?: string,
 ): Promise<ExifData | null> {
+  const { logger } = await import("@/lib/logger");
   try {
     let bufferToParse = buffer;
     if (
@@ -114,6 +113,7 @@ export async function extractExifData(
       bufferToParse = buffer.subarray(6);
     }
     const attemptParse = async (buf: Buffer) => {
+      const exifr = await import("exifr");
       const isTiff =
         buf.length > 2 &&
         ((buf[0] === 0x49 && buf[1] === 0x49) ||

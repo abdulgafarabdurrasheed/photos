@@ -3,12 +3,13 @@ import { notFound } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { APP_URL } from "@/lib/constants";
 import { db } from "@/lib/db";
+import { leanMediaColumns } from "@/lib/db/lean-columns";
 import { media, mediaLikes, series } from "@/lib/db/schema";
 import { logger } from "@/lib/logger";
+import { toClientMedia } from "@/lib/media/client-media";
 import { getAssetProxyUrl, getMediaProxyUrl } from "@/lib/media/s3";
 import { createOgMetadata } from "@/lib/metadata";
 import { can, getAccessibleEventIds, getUserContext } from "@/lib/policy";
-import { toPublicUser } from "@/lib/user-display";
 
 const MAX_SERIES_PAGE_MEDIA = 2_000;
 
@@ -116,6 +117,7 @@ export default async function SeriesDetailPage({
     eventIds.length > 0
       ? await db.query.media.findMany({
           where: inArray(media.eventId, eventIds),
+          columns: leanMediaColumns,
           with: {
             uploadedBy: {
               columns: {
@@ -186,21 +188,7 @@ export default async function SeriesDetailPage({
     <SeriesDetailClient
       series={{ ...seriesData, events: seriesEvents }}
       allMedia={allMedia.map((m) => ({
-        id: m.id,
-        filename: m.filename,
-        mimeType: m.mimeType,
-        width: m.width,
-        height: m.height,
-        exifData: m.exifData as Record<string, unknown> | null,
-        latitude: m.latitude,
-        longitude: m.longitude,
-        uploadedAt: m.uploadedAt,
-        caption: m.caption,
-        s3Url: m.s3Url,
-        s3Key: m.s3Key,
-        eventId: m.eventId,
-        thumbnailS3Key: m.thumbnailS3Key,
-        uploadedBy: toPublicUser(m.uploadedBy),
+        ...toClientMedia(m),
         likeCount: likeCountByMediaId.get(m.id) ?? 0,
       }))}
       photoCount={photoCount}

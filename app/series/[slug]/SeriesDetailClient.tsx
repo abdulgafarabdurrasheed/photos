@@ -25,16 +25,18 @@ interface Event {
 }
 interface MediaItem {
   id: string;
-  s3Url: string;
-  s3Key: string;
-  thumbnailS3Key: string | null;
+  s3Url?: string;
+  s3Key?: string;
+  thumbnailS3Key?: string | null;
+  thumbnailUrl?: string | null;
+  displayUrl?: string | null;
   filename: string;
   mimeType: string;
   width: number | null;
   height: number | null;
   exifData: Record<string, unknown> | null;
   uploadedAt: Date;
-  eventId: string;
+  eventId?: string;
   uploadedBy: {
     id: string;
     name: string;
