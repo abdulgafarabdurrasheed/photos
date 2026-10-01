@@ -567,7 +567,6 @@ export default function MediaGallery({
                 <span className="sm:hidden">Owner</span>
               </button>
             )}
-            {isAdmin && (
               <button
                 type="button"
                 onClick={handleBulkDownload}
@@ -599,7 +598,6 @@ export default function MediaGallery({
                       : "Download"}
                 </span>
               </button>
-            )}
             {canDeleteSelection && (
               <button
                 type="button"
